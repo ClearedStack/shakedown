@@ -1,0 +1,21 @@
+{
+  "slug": "shakedown",
+  "name": "Shakedown",
+  "formerly": "cs-07-verify",
+  "kind": "worker",
+  "stage": 7,
+  "namespace": "cs-workers",
+  "responsibility": "Checks a built tool against the five listing conditions before it can be listed.",
+  "interfaces": [
+    "Leases built tools from Muster",
+    "Returns a pass or fail on each of the five conditions"
+  ],
+  "repository": "shakedown",
+  "image": "shakedown",
+  "dependsOn": [
+    "muster"
+  ],
+  "memory": "30 MiB",
+  "version": "v0.1.0-draft",
+  "subTools": []
+}
