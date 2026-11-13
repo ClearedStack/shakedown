@@ -1,0 +1,54 @@
+{
+  "format": "v2",
+  "cases": [
+    {
+      "name": "worked-twelve-crates-forty-five-days",
+      "kind": "worked",
+      "calculation": "storage-fee",
+      "input": { "crates": 12, "days": 45 },
+      "expect": { "ok": true, "perCrate": 5, "fee": 60, "capped": false }
+    },
+    {
+      "name": "boundary-zero-crates",
+      "kind": "boundary",
+      "calculation": "storage-fee",
+      "input": { "crates": 0, "days": 10 },
+      "expect": { "ok": true, "perCrate": 2, "fee": 0, "capped": false }
+    },
+    {
+      "name": "boundary-last-day-of-first-tier",
+      "kind": "boundary",
+      "calculation": "storage-fee",
+      "input": { "crates": 7, "days": 30 },
+      "expect": { "ok": true, "perCrate": 2, "fee": 14, "capped": false }
+    },
+    {
+      "name": "boundary-first-day-of-second-tier",
+      "kind": "boundary",
+      "calculation": "storage-fee",
+      "input": { "crates": 7, "days": 31 },
+      "expect": { "ok": true, "perCrate": 5, "fee": 35, "capped": false }
+    },
+    {
+      "name": "boundary-empty-input",
+      "kind": "boundary",
+      "calculation": "storage-fee",
+      "input": {},
+      "expect": { "ok": false, "reason": "crates and days must be whole numbers, zero or more" }
+    },
+    {
+      "name": "boundary-past-last-tier",
+      "kind": "boundary",
+      "calculation": "storage-fee",
+      "input": { "crates": 1, "days": 366 },
+      "expect": { "ok": false, "reason": "storage longer than 365 days is out of scope" }
+    },
+    {
+      "name": "synthetic-capped-total",
+      "kind": "synthetic",
+      "calculation": "storage-fee",
+      "input": { "crates": 1000, "days": 100 },
+      "expect": { "ok": true, "perCrate": 9, "fee": 4000, "capped": true }
+    }
+  ]
+}

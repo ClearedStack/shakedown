@@ -1,0 +1,18 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        pass
+tracking   pass
+examples   fail
+citations  pass
+
+verdict    fail
+
+findings:
+  examples  E_PARSE         EX-THREW                   examples.json: the case boundary-empty-input raised an error
+  examples  E_PARSE         EX-THREW                   examples.json: the case boundary-first-day-of-second-tier raised an error
+  examples  E_PARSE         EX-THREW                   examples.json: the case boundary-last-day-of-first-tier raised an error
+  examples  E_PARSE         EX-THREW                   examples.json: the case boundary-past-last-tier raised an error
+  examples  E_PARSE         EX-THREW                   examples.json: the case boundary-zero-crates raised an error
+  examples  E_PARSE         EX-THREW                   examples.json: the case synthetic-capped-total raised an error
+  examples  E_PARSE         EX-THREW                   examples.json: the case worked-twelve-crates-forty-five-days raised an error

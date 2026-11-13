@@ -1,0 +1,11 @@
+{
+  "contract": "v1",
+  "telemetry": true,
+  "template": "calculator",
+  "entry": "index.html",
+  "logic": {
+    "scripts": ["tables.js", "calc.js"],
+    "function": "calculate"
+  },
+  "examples": "examples.json"
+}

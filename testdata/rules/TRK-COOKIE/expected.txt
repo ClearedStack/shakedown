@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        pass
+tracking   fail
+examples   pass
+citations  pass
+
+verdict    fail
+
+findings:
+  tracking  E_PARSE         TRK-COOKIE                 extra.js: reads or writes cookies

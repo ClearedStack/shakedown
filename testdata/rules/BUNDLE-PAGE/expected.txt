@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    fail
+csp        fail
+tracking   fail
+examples   fail
+citations  fail
+
+verdict    fail
+
+findings:
+  bundle    E_PARSE         BUNDLE-PAGE                deep.html: the page could not be read as HTML

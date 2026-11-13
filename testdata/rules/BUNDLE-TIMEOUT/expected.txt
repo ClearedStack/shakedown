@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    timeout
+csp        timeout
+tracking   timeout
+examples   timeout
+citations  timeout
+
+verdict    timeout
+
+findings:
+  bundle    E_TIMEOUT       BUNDLE-TIMEOUT             the check did not finish before its deadline

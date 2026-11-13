@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        fail
+tracking   pass
+examples   pass
+citations  pass
+
+verdict    fail
+
+findings:
+  csp       E_PARSE         CSP-INVALID                extra.html: the policy repeats a directive

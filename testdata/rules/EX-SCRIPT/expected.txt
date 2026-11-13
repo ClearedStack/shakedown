@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        pass
+tracking   pass
+examples   fail
+citations  pass
+
+verdict    fail
+
+findings:
+  examples  E_PARSE         EX-SCRIPT                  shakedown.json: the logic scripts do not define the named function

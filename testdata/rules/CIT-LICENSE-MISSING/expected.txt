@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        pass
+tracking   pass
+examples   pass
+citations  fail
+
+verdict    fail
+
+findings:
+  citations E_PARSE         CIT-LICENSE-MISSING        the bundle has no LICENSE file

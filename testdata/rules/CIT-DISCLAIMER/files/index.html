@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; object-src 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crate storage fee (made-up sample)</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Crate storage fee</h1>
+<p>A made-up sample tool. The regulation, the rates and the cap are invented for testing.</p>
+
+<label for="crates">Crates stored</label>
+<input id="crates" type="number" min="0" step="1" value="12">
+<label for="days">Days in storage</label>
+<input id="days" type="number" min="0" step="1" value="45">
+<button id="go" type="button">Work it out</button>
+<p id="result" role="status"></p>
+
+<h2>Source</h2>
+<p data-shakedown="citation" data-calculation="storage-fee" data-regulation="Fictional Example Regulation 12" data-paragraph="12.3(b)" data-revised="2024-03-01">
+Fee per crate by length of storage, and the cap on the total: Fictional Example Regulation 12, paragraph 12.3(b), revised 2024-03-01.
+<a href="https://regulations.example/fer/12">Read the made-up source</a>.
+</p>
+
+<h2>What this does not cover</h2>
+<p data-shakedown="scope-exclusions">Storage longer than 365 days, part crates, and refrigerated crates are out of scope.</p>
+
+<h2>Your data</h2>
+<p data-shakedown="storage-disclosure">The last numbers you typed are kept in this browser's local storage so they are there next time. They never leave this device.</p>
+<button id="clear" type="button" data-shakedown="clear-data">Clear saved data</button>
+
+<script src="tables.js"></script>
+<script src="calc.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

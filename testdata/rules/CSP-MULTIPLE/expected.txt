@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        fail
+tracking   pass
+examples   pass
+citations  pass
+
+verdict    fail
+
+findings:
+  csp       E_PARSE         CSP-MULTIPLE               extra.html: the page has more than one Content-Security-Policy meta element

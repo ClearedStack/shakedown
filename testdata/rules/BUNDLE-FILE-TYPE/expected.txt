@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    needs_subtool
+csp        needs_subtool
+tracking   needs_subtool
+examples   needs_subtool
+citations  needs_subtool
+
+verdict    needs_subtool
+
+findings:
+  bundle    E_NEEDS_SUBTOOL BUNDLE-FILE-TYPE           chart.svg: no rule covers this type of file
