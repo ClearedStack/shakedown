@@ -543,4 +543,3 @@ func TestDecodeMoldloftBundleRejectsMalformedEnvelopes(t *testing.T) {
 		}
 	}
 }
-

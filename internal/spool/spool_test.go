@@ -168,3 +168,61 @@ func TestTamperedAndPermanentRefusalDroppedSafely(t *testing.T) {
 		t.Fatalf("pending = %d, want 0", n)
 	}
 }
+
+func TestOpenOrMemoryReadOnlyFallback(t *testing.T) {
+	roDir := filepath.Join(t.TempDir(), "readonly")
+	if err := os.MkdirAll(roDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) })
+
+	s, inMem, err := OpenOrMemory(roDir)
+	if err != nil {
+		t.Fatalf("OpenOrMemory error: %v", err)
+	}
+	if !inMem {
+		t.Fatal("expected inMem=true on unwritable 0500 directory")
+	}
+
+	if _, err := s.Stage(Entry{
+		Kind:   KindComplete,
+		Lease:  "PA-0010.1.1",
+		State:  "building",
+		Result: json.RawMessage(`{"verdict":"pass"}`),
+	}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	// Single-slot bound rejects a second concurrent entry before draining.
+	if _, err := s.Stage(Entry{
+		Kind:  KindFail,
+		Lease: "PA-0011.1.1",
+		Code:  muster.CodeParse,
+	}); err != ErrSpoolFull {
+		t.Fatalf("got %v, want ErrSpoolFull", err)
+	}
+
+	disp := &fakeDispatcher{
+		err: &muster.Refusal{
+			Status: http.StatusServiceUnavailable,
+			Code:   muster.CodeTimeout,
+			Cause:  "store_slow",
+			Reason: "the record store took too long",
+		},
+	}
+	if _, err := s.Drain(context.Background(), disp); err == nil || !muster.IsRetryable(err) {
+		t.Fatalf("expected retryable error on transient 503, got %v", err)
+	}
+	if n, _ := s.Pending(); n != 1 {
+		t.Fatalf("pending = %d, want 1", n)
+	}
+
+	disp.err = nil
+	disp.calls = nil
+	out, err := s.Drain(context.Background(), disp)
+	if err != nil || out.Delivered != 1 {
+		t.Fatalf("recovery Drain = (%+v, %v)", out, err)
+	}
+	if n, _ := s.Pending(); n != 0 {
+		t.Fatalf("pending = %d, want 0", n)
+	}
+}
