@@ -1,6 +1,8 @@
 package shakedown_test
 
 import (
+	"bytes"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -162,6 +164,10 @@ func TestDeployManifestsAndKoConfig(t *testing.T) {
 		"memory: 30Mi",
 		"mountPath: /var/spool/cs",
 		"CONTRACT_VERSION",
+		"containerPort: 8080",
+		"path: /healthz",
+		"readinessProbe:",
+		"livenessProbe:",
 	}
 	for _, needle := range requiredInDeploy {
 		if !strings.Contains(dep, needle) {
@@ -187,5 +193,99 @@ func TestDeployManifestsAndKoConfig(t *testing.T) {
 		if !strings.Contains(np, needle) {
 			t.Errorf("deploy/networkpolicy.yaml missing required setting %q", needle)
 		}
+	}
+}
+
+func TestAppYAMLAndKustomization(t *testing.T) {
+	appRaw, err := os.ReadFile("app.yaml")
+	if err != nil {
+		t.Fatalf("missing app.yaml: %v", err)
+	}
+	if bytes.ContainsRune(appRaw, '\r') || bytes.ContainsRune(appRaw, '\x00') || bytes.ContainsRune(appRaw, '\t') {
+		t.Fatal("app.yaml must use LF line endings only with no tabs or NUL bytes")
+	}
+	appText := string(appRaw)
+	digestLineRE := regexp.MustCompile(`^digest:\s*sha256:[0-9a-f]{64}$`)
+	fields := map[string]string{}
+	digestLines := 0
+	for _, line := range strings.Split(strings.TrimRight(appText, "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == "---" || trimmed == "..." {
+			t.Fatalf("app.yaml must be a single document without %q markers", trimmed)
+		}
+		if strings.HasPrefix(line, "digest:") {
+			digestLines++
+			if !digestLineRE.MatchString(line) {
+				t.Errorf("invalid digest line %q in app.yaml", line)
+			}
+		}
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("malformed line in app.yaml: %q", line)
+		}
+		fields[strings.TrimSpace(key)] = strings.TrimSpace(val)
+	}
+	if digestLines != 1 {
+		t.Fatalf("app.yaml must have exactly 1 top-level digest line, got %d", digestLines)
+	}
+	wantFields := map[string]string{
+		"name":      "shakedown",
+		"namespace": "cs-workers",
+		"image":     "shakedown",
+		"replicas":  "1",
+		"port":      "8080",
+		"memory":    "30Mi",
+	}
+	for k, want := range wantFields {
+		if got := fields[k]; got != want {
+			t.Errorf("app.yaml %s = %q, want %q", k, got, want)
+		}
+	}
+
+	kustRaw, err := os.ReadFile("kustomization.yaml")
+	if err != nil {
+		t.Fatalf("missing kustomization.yaml: %v", err)
+	}
+	kust := string(kustRaw)
+	for _, rel := range []string{"deploy/networkpolicy.yaml", "deploy/shakedown.yaml"} {
+		if !strings.Contains(kust, rel) {
+			t.Errorf("kustomization.yaml missing %q", rel)
+		}
+	}
+}
+
+func TestGofmtClean(t *testing.T) {
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		formatted, err := format.Source(src)
+		if err != nil {
+			t.Errorf("%s failed go/format: %v", path, err)
+			return nil
+		}
+		if !bytes.Equal(src, formatted) {
+			t.Errorf("%s is not gofmt-formatted", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

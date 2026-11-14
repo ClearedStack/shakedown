@@ -27,11 +27,11 @@ func FuzzCheckMap(f *testing.F) {
 			return
 		}
 		files := map[string][]byte{
-			"LICENSE":      []byte("MIT License\nPermission is hereby granted, free of charge"),
-			"index.html":   []byte(htmlStr),
-			"calc.js":      []byte(jsStr),
+			"LICENSE":       []byte("MIT License\nPermission is hereby granted, free of charge"),
+			"index.html":    []byte(htmlStr),
+			"calc.js":       []byte(jsStr),
 			"examples.json": []byte(examplesStr),
-			"README.md":    []byte(readmeStr),
+			"README.md":     []byte(readmeStr),
 		}
 		if len(manifestStr) > 0 && manifestStr[0] == '{' && len(manifestStr)%2 == 0 {
 			files["moldloft.json"] = []byte(manifestStr)

@@ -1,0 +1,10 @@
+# Desired state of Shakedown for Keelworks digest pinning and Shipkeeper reconciliation.
+# The bootstrap digest is replaced when Keelworks builds and signs the image
+# into Lazarette with [skip-ci].
+name: shakedown
+namespace: cs-workers
+image: shakedown
+digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+replicas: 1
+port: 8080
+memory: 30Mi

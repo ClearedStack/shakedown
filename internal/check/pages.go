@@ -34,14 +34,16 @@ type policyMeta struct {
 }
 
 type page struct {
-	path             string
-	policies         []policyMeta
-	markers          []marker
-	hasScopeSection  bool
-	scopeItems       []string
-	footerText       string
-	citeItems        map[string]string
-	citeLinks        map[string]bool
+	path            string
+	doc             *htmlparse.Node
+	scriptSrcs      []string
+	policies        []policyMeta
+	markers         []marker
+	hasScopeSection bool
+	scopeItems      []string
+	footerText      string
+	citeItems       map[string]string
+	citeLinks       map[string]bool
 }
 
 // loaders are the elements that can fetch or run something. A policy written
@@ -94,6 +96,7 @@ func (c *checker) scanPages(b *bundle) map[string]*page {
 		}
 		pg := &page{
 			path:      p,
+			doc:       doc,
 			citeItems: map[string]string{},
 			citeLinks: map[string]bool{},
 		}
@@ -170,11 +173,16 @@ func (c *checker) scanElement(b *bundle, pg *page, n *htmlparse.Node, inHead boo
 	case "base":
 		unfamiliar("a base element")
 	case "script":
-		if _, hasSrc := attr(n, "src"); !hasSrc {
-			t, _ := attr(n, "type")
-			if scriptTypes[strings.ToLower(strings.TrimSpace(t))] && textOf(n) != "" {
-				inline()
+		t, _ := attr(n, "type")
+		isExec := scriptTypes[strings.ToLower(strings.TrimSpace(t))]
+		if src, hasSrc := attr(n, "src"); hasSrc {
+			if isExec {
+				if target, ok := b.resolveLocalRef(p, src); ok {
+					pg.scriptSrcs = append(pg.scriptSrcs, target)
+				}
 			}
+		} else if isExec && textOf(n) != "" {
+			inline()
 		}
 	case "style":
 		inline()

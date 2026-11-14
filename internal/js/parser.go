@@ -224,13 +224,13 @@ func (*condExpr) exprNode()     {}
 func (*seqExpr) exprNode()      {}
 
 type parser struct {
-	tokens   []token
-	pos      int
-	depth    int
-	fnDepth  int
-	loopSw   int
-	noIn     bool
-	prog     *Program
+	tokens  []token
+	pos     int
+	depth   int
+	fnDepth int
+	loopSw  int
+	noIn    bool
+	prog    *Program
 }
 
 func (p *parser) cur() token {

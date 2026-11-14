@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/ClearedStack/shakedown/internal/muster"
 )
@@ -30,8 +32,9 @@ const (
 )
 
 const (
-	maxEntries   = 64
-	maxEntrySize = 128 << 10
+	maxEntries    = 64
+	maxMemEntries = 1
+	maxEntrySize  = 128 << 10
 )
 
 // Entry is one outbound Muster report staged on disk.
@@ -52,10 +55,61 @@ var (
 	ErrSpoolFormat = errors.New("E_PARSE: invalid outbound spool entry")
 )
 
-// Spool manages staged reports in a single writable directory.
+type memRecord struct {
+	name string
+	raw  []byte
+}
+
+// Spool manages staged reports in a single writable directory, or in a bounded
+// single-slot in-memory buffer when the container rootfs is read-only without
+// a mounted spool volume.
 type Spool struct {
-	dir string
-	seq atomic.Uint64
+	dir      string
+	inMemory bool
+	seq      atomic.Uint64
+	mu       sync.Mutex
+	mem      []memRecord
+}
+
+// NewMemory returns a bounded single-entry in-memory Spool that applies the
+// same validation, canonical JSON encoding, and SHA-256 verification as Open.
+func NewMemory() *Spool {
+	return &Spool{inMemory: true}
+}
+
+// OpenOrMemory opens dir when writable, or falls back to NewMemory (returning
+// inMemory=true) only when dir cannot be created or written due to a read-only
+// filesystem or directory permissions.
+func OpenOrMemory(dir string) (*Spool, bool, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, false, ErrSpoolFormat
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		if isReadOnlyOrPerm(err) {
+			return NewMemory(), true, nil
+		}
+		return nil, false, ErrSpoolIO
+	}
+	probe, err := os.CreateTemp(dir, ".probe-*.tmp")
+	if err != nil {
+		if isReadOnlyOrPerm(err) {
+			return NewMemory(), true, nil
+		}
+		return nil, false, ErrSpoolIO
+	}
+	probeName := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(probeName)
+
+	s, err := Open(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	return s, false, nil
+}
+
+func isReadOnlyOrPerm(err error) bool {
+	return errors.Is(err, syscall.EROFS) || errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EACCES)
 }
 
 // Open prepares dir as an outbound spool, removing any incomplete .tmp files
@@ -156,7 +210,7 @@ func safeLeaseToken(lease string) string {
 }
 
 // Stage validates e, computes its canonical SHA-256 digest, and writes it
-// atomically into the spool directory.
+// atomically into the spool directory (or into the bounded in-memory slot).
 func (s *Spool) Stage(e Entry) (string, error) {
 	if err := validateEntry(&e); err != nil {
 		return "", err
@@ -167,6 +221,24 @@ func (s *Spool) Stage(e Entry) (string, error) {
 	}
 	e.Digest = digest
 
+	raw, err := json.Marshal(e)
+	if err != nil || len(raw) > maxEntrySize {
+		return "", ErrSpoolFormat
+	}
+	raw = append(raw, '\n')
+
+	if s.inMemory {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if len(s.mem) >= maxMemEntries {
+			return "", ErrSpoolFull
+		}
+		n := s.seq.Add(1)
+		finalName := fmt.Sprintf("%08d-%s.json", n, safeLeaseToken(e.Lease))
+		s.mem = append(s.mem, memRecord{name: finalName, raw: raw})
+		return finalName, nil
+	}
+
 	existing, err := s.files()
 	if err != nil {
 		return "", ErrSpoolIO
@@ -174,12 +246,6 @@ func (s *Spool) Stage(e Entry) (string, error) {
 	if len(existing) >= maxEntries {
 		return "", ErrSpoolFull
 	}
-
-	raw, err := json.Marshal(e)
-	if err != nil || len(raw) > maxEntrySize {
-		return "", ErrSpoolFormat
-	}
-	raw = append(raw, '\n')
 
 	n := s.seq.Add(1)
 	finalName := fmt.Sprintf("%08d-%s.json", n, safeLeaseToken(e.Lease))
@@ -215,8 +281,13 @@ func (s *Spool) Stage(e Entry) (string, error) {
 	return finalName, nil
 }
 
-// Pending returns how many staged entries are currently waiting on disk.
+// Pending returns how many staged entries are currently waiting.
 func (s *Spool) Pending() (int, error) {
+	if s.inMemory {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.mem), nil
+	}
 	list, err := s.files()
 	if err != nil {
 		return 0, ErrSpoolIO
@@ -242,16 +313,7 @@ func (s *Spool) files() ([]string, error) {
 	return names, nil
 }
 
-func readSpooledEntry(path string) (Entry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return Entry{}, ErrSpoolIO
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, maxEntrySize+1))
-	if err != nil {
-		return Entry{}, ErrSpoolIO
-	}
+func parseSpooledBytes(raw []byte) (Entry, error) {
 	if len(raw) > maxEntrySize {
 		return Entry{}, ErrSpoolFormat
 	}
@@ -274,11 +336,40 @@ func readSpooledEntry(path string) (Entry, error) {
 	return e, nil
 }
 
+func readSpooledEntry(path string) (Entry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Entry{}, ErrSpoolIO
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxEntrySize+1))
+	if err != nil {
+		return Entry{}, ErrSpoolIO
+	}
+	return parseSpooledBytes(raw)
+}
+
 // DrainOutcome summarizes one Drain pass over staged reports.
 type DrainOutcome struct {
 	Delivered int
 	Dropped   int
 	Warnings  []string
+}
+
+func dispatchEntry(ctx context.Context, disp muster.Dispatcher, e Entry) error {
+	switch e.Kind {
+	case KindComplete:
+		_, err := disp.Complete(ctx, e.Lease, e.State, e.Result)
+		return err
+	case KindFail:
+		_, err := disp.Fail(ctx, e.Lease, e.Code)
+		return err
+	case KindNeedsSubtool:
+		_, err := disp.NeedsSubtool(ctx, e.Lease)
+		return err
+	default:
+		return ErrSpoolFormat
+	}
 }
 
 // Drain replays all staged reports in order through disp.
@@ -287,8 +378,11 @@ type DrainOutcome struct {
 // with a non-retryable 4xx status (for example 409 lease_not_held or
 // 409 move_not_allowed) or a corrupted file on disk is dropped and recorded in
 // Warnings without filesystem paths. A retryable error stops Drain and leaves
-// the remaining entries staged on disk for the next attempt.
+// the remaining entries staged for the next attempt.
 func (s *Spool) Drain(ctx context.Context, disp muster.Dispatcher) (DrainOutcome, error) {
+	if s.inMemory {
+		return s.drainMemory(ctx, disp)
+	}
 	var out DrainOutcome
 	names, err := s.files()
 	if err != nil {
@@ -310,16 +404,7 @@ func (s *Spool) Drain(ctx context.Context, disp muster.Dispatcher) (DrainOutcome
 			return out, err
 		}
 
-		var sendErr error
-		switch e.Kind {
-		case KindComplete:
-			_, sendErr = disp.Complete(ctx, e.Lease, e.State, e.Result)
-		case KindFail:
-			_, sendErr = disp.Fail(ctx, e.Lease, e.Code)
-		case KindNeedsSubtool:
-			_, sendErr = disp.NeedsSubtool(ctx, e.Lease)
-		}
-
+		sendErr := dispatchEntry(ctx, disp, e)
 		if sendErr == nil {
 			_ = os.Remove(full)
 			out.Delivered++
@@ -328,19 +413,58 @@ func (s *Spool) Drain(ctx context.Context, disp muster.Dispatcher) (DrainOutcome
 		if muster.IsRetryable(sendErr) {
 			return out, sendErr
 		}
-		if muster.IsPermanentRefusal(sendErr) {
-			_ = os.Remove(full)
-			out.Dropped++
-			out.Warnings = append(out.Warnings, sendErr.Error())
-			continue
-		}
-		// Non-retryable 5xx (such as 500 unexpected) or local validation error:
-		// drop malformed local entries, keep unexpected server failures for retry
-		// only if transient; Muster 500 unexpected/bad_record carry E_PARSE and
-		// cannot succeed by replaying the identical payload.
 		_ = os.Remove(full)
 		out.Dropped++
 		out.Warnings = append(out.Warnings, sendErr.Error())
 	}
 	return out, nil
+}
+
+func (s *Spool) drainMemory(ctx context.Context, disp muster.Dispatcher) (DrainOutcome, error) {
+	var out DrainOutcome
+	for {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		s.mu.Lock()
+		if len(s.mem) == 0 {
+			s.mu.Unlock()
+			return out, nil
+		}
+		rec := s.mem[0]
+		s.mu.Unlock()
+
+		e, err := parseSpooledBytes(rec.raw)
+		if err != nil {
+			s.mu.Lock()
+			if len(s.mem) > 0 && s.mem[0].name == rec.name {
+				s.mem = s.mem[1:]
+			}
+			s.mu.Unlock()
+			out.Dropped++
+			out.Warnings = append(out.Warnings, muster.CodeParse+": dropped corrupted spool entry")
+			continue
+		}
+
+		sendErr := dispatchEntry(ctx, disp, e)
+		if sendErr == nil {
+			s.mu.Lock()
+			if len(s.mem) > 0 && s.mem[0].name == rec.name {
+				s.mem = s.mem[1:]
+			}
+			s.mu.Unlock()
+			out.Delivered++
+			continue
+		}
+		if muster.IsRetryable(sendErr) {
+			return out, sendErr
+		}
+		s.mu.Lock()
+		if len(s.mem) > 0 && s.mem[0].name == rec.name {
+			s.mem = s.mem[1:]
+		}
+		s.mu.Unlock()
+		out.Dropped++
+		out.Warnings = append(out.Warnings, sendErr.Error())
+	}
 }
