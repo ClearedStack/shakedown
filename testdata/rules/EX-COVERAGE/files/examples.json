@@ -1,0 +1,12 @@
+{
+  "format": "v1",
+  "cases": [
+    {
+      "name": "worked-twelve-crates-forty-five-days",
+      "kind": "worked",
+      "calculation": "storage-fee",
+      "input": { "crates": 12, "days": 45 },
+      "expect": { "ok": true, "perCrate": 5, "fee": 60, "capped": false }
+    }
+  ]
+}

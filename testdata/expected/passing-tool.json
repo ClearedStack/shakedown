@@ -1,0 +1,29 @@
+{
+  "component": "shakedown",
+  "version": "v0.1.0-draft",
+  "contract": "v1",
+  "verdict": "pass",
+  "conditions": [
+    {
+      "condition": "offline",
+      "status": "pass"
+    },
+    {
+      "condition": "csp",
+      "status": "pass"
+    },
+    {
+      "condition": "tracking",
+      "status": "pass"
+    },
+    {
+      "condition": "examples",
+      "status": "pass"
+    },
+    {
+      "condition": "citations",
+      "status": "pass"
+    }
+  ],
+  "findings": []
+}

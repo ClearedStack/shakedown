@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    fail
+csp        pass
+tracking   pass
+examples   pass
+citations  pass
+
+verdict    fail
+
+findings:
+  offline   E_PARSE         OFF-REMOTE-STRING          extra.js: contains an address outside the bundle

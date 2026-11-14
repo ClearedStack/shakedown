@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        needs_subtool
+tracking   pass
+examples   pass
+citations  pass
+
+verdict    needs_subtool
+
+findings:
+  csp       E_NEEDS_SUBTOOL CSP-UNFAMILIAR             extra.html: no rule covers a source in the policy

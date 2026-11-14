@@ -1,0 +1,13 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        pass
+tracking   pass
+examples   pass
+citations  fail
+
+verdict    fail
+
+findings:
+  citations E_PARSE         CIT-MISSING                the calculation storage-fee has no complete citation
+  citations E_PARSE         CIT-INCOMPLETE             index.html: a citation needs a calculation, a regulation, a paragraph, a revision date written YYYY-MM-DD, and text

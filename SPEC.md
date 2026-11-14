@@ -2,7 +2,7 @@
 
 > Automated 5-condition verification worker that tests built static tools for offline execution, strict CSP, zero tracking, worked examples, and public citations before catalog publication.
 
-**Status: design.** This is a specification. It describes how Shakedown is meant to work, not something that exists yet.
+**Status: built (`v0.1.0-draft`, contract `v1`).** This specification describes Shakedown's static 5-condition verification suite, Muster worker loop, local `/var/spool/cs` staging, and hardened `cs-workers` deployment manifests.
 
 The same text is published at [clearedstack.com/platform/shakedown/](https://clearedstack.com/platform/shakedown/). To change the specification, change it here and say why.
 
@@ -21,7 +21,7 @@ Like every worker in the pipeline, Shakedown is a 100% deterministic Go service 
 | **Kind** | `worker` (100% deterministic Go, zero runtime AI) |
 | **Version** | `v0.1.0-draft` |
 | **RAM Budget** | `30 MiB` |
-| **Sub-Tools** | None (`[]` — universal 5-condition checks) |
+| **Sub-Tools** | None (`[]`: universal 5-condition checks) |
 | **Local Spool** | `/var/spool/cs` (persists completed results across Muster restarts) |
 | **Contract Version** | `CONTRACT_VERSION=v1` (owned by `clearedstack.com`) |
 

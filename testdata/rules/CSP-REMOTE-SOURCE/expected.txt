@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        fail
+tracking   pass
+examples   pass
+citations  pass
+
+verdict    fail
+
+findings:
+  csp       E_PARSE         CSP-REMOTE-SOURCE          extra.html: img-src allows a source outside the bundle
