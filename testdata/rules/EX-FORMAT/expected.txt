@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        pass
+tracking   pass
+examples   needs_subtool
+citations  pass
+
+verdict    needs_subtool
+
+findings:
+  examples  E_NEEDS_SUBTOOL EX-FORMAT                  examples.json: no rule covers this examples format

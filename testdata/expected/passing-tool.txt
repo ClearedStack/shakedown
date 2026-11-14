@@ -1,0 +1,9 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        pass
+tracking   pass
+examples   pass
+citations  pass
+
+verdict    pass

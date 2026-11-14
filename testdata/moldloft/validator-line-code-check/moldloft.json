@@ -1,0 +1,81 @@
+{
+  "generator": "moldloft",
+  "generator_version": "v0.1.0-draft",
+  "contract_version": "v1",
+  "template": "validator",
+  "item_id": "PA-0102",
+  "slug": "sample-line-code-check",
+  "spec_sha256": "e0df2832f9c9629473b1728b537141bbb77ea2ba0a1844f322cd918fc2be57b5",
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 1077,
+      "sha256": "13d42f8cf5db0e0c0c6a5bd224925995f9f6c65fcaf99af5ac98adf248a887e2"
+    },
+    {
+      "path": "README.md",
+      "bytes": 995,
+      "sha256": "201d133134d734b04873cb03ca9c8d16f656000f07abbd1bf32dacf5ba913c87"
+    },
+    {
+      "path": "css/style.css",
+      "bytes": 3219,
+      "sha256": "5620966cf77c6f0e1590bab01a3bc15bd034fcb8281ac2e0a38e9cd13290e17e"
+    },
+    {
+      "path": "data/tool.json",
+      "bytes": 1842,
+      "sha256": "3269e949aab576367fa5956d0ec00e715a01c0fb8836cf264fa50acbcf3d5d9e"
+    },
+    {
+      "path": "index.html",
+      "bytes": 3699,
+      "sha256": "d97c163adac0811f01a16c83efb3bcb76e179364917f4de2d8c91a342bd8f01a"
+    },
+    {
+      "path": "js/app.js",
+      "bytes": 3429,
+      "sha256": "036ac12a9744ee997421299c4bae6b20e11bebfdff8ca1b52b974f7e6e369b0e"
+    },
+    {
+      "path": "js/data.js",
+      "bytes": 1934,
+      "sha256": "13066304c11bfe072fb625148ab2343c533587a085e4236afad763273cbc8a79"
+    },
+    {
+      "path": "js/engine.js",
+      "bytes": 3363,
+      "sha256": "4290d1255b325ef0c80ac96918ae93042a54d697a3b0dbf398a563fd1b7d1328"
+    },
+    {
+      "path": "tests/browser.js",
+      "bytes": 968,
+      "sha256": "0c596eed3b02b1c7398c8f480f285c1a7e74ad187b352b817c3d07e87a831f49"
+    },
+    {
+      "path": "tests/check.js",
+      "bytes": 750,
+      "sha256": "9bf72ff05b0aadd2f862d23912ff55ed4b065c64c2b8edb4d410c35a4cb21115"
+    },
+    {
+      "path": "tests/index.html",
+      "bytes": 944,
+      "sha256": "9fcbb51809605171a80ffcd7b2bbc7bb8a2620c480169c8de4f031750ab95d90"
+    },
+    {
+      "path": "tests/run.js",
+      "bytes": 1219,
+      "sha256": "f0b31f2ca141b9064898eb0f2bf58a73d8dfbf6e07c1d909f96bd8ef83e6fea0"
+    },
+    {
+      "path": "tests/worked-examples.js",
+      "bytes": 653,
+      "sha256": "41fc89dbe87fab675d1883229e035f495d52c2fe34e3be5a62766018134c3c0a"
+    },
+    {
+      "path": "tests/worked-examples.json",
+      "bytes": 557,
+      "sha256": "129597c9d1ca4f205053b53a75393063e1d326ec701d3b51b7995bde86617058"
+    }
+  ]
+}

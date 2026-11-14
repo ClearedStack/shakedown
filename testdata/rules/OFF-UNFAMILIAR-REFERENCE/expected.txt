@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    needs_subtool
+csp        pass
+tracking   pass
+examples   pass
+citations  pass
+
+verdict    needs_subtool
+
+findings:
+  offline   E_NEEDS_SUBTOOL OFF-UNFAMILIAR-REFERENCE   extra.html: no rule covers the form of an address on this page

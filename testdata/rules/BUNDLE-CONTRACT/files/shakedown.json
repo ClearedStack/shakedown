@@ -1,0 +1,10 @@
+{
+  "contract": "v2",
+  "template": "calculator",
+  "entry": "index.html",
+  "logic": {
+    "scripts": ["tables.js", "calc.js"],
+    "function": "calculate"
+  },
+  "examples": "examples.json"
+}

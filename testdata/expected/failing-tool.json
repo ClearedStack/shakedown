@@ -1,0 +1,119 @@
+{
+  "component": "shakedown",
+  "version": "v0.1.0-draft",
+  "contract": "v1",
+  "verdict": "fail",
+  "conditions": [
+    {
+      "condition": "offline",
+      "status": "fail"
+    },
+    {
+      "condition": "csp",
+      "status": "fail"
+    },
+    {
+      "condition": "tracking",
+      "status": "fail"
+    },
+    {
+      "condition": "examples",
+      "status": "fail"
+    },
+    {
+      "condition": "citations",
+      "status": "fail"
+    }
+  ],
+  "findings": [
+    {
+      "condition": "offline",
+      "rule": "OFF-NETWORK-API",
+      "code": "E_PARSE",
+      "file": "app.js",
+      "message": "uses fetch, which reaches the network after the page has loaded"
+    },
+    {
+      "condition": "offline",
+      "rule": "OFF-REMOTE-STRING",
+      "code": "E_PARSE",
+      "file": "app.js",
+      "message": "contains an address outside the bundle"
+    },
+    {
+      "condition": "offline",
+      "rule": "OFF-REMOTE-REFERENCE",
+      "code": "E_PARSE",
+      "file": "index.html",
+      "message": "loads or submits to an address outside the bundle"
+    },
+    {
+      "condition": "csp",
+      "rule": "CSP-CONNECT-SRC",
+      "code": "E_PARSE",
+      "file": "index.html",
+      "message": "connect-src must be exactly 'self'"
+    },
+    {
+      "condition": "csp",
+      "rule": "CSP-DEFAULT-SRC",
+      "code": "E_PARSE",
+      "file": "index.html",
+      "message": "default-src must be exactly 'self'"
+    },
+    {
+      "condition": "csp",
+      "rule": "CSP-FORM-ACTION",
+      "code": "E_PARSE",
+      "file": "index.html",
+      "message": "form-action must be exactly 'none'"
+    },
+    {
+      "condition": "tracking",
+      "rule": "TRK-COOKIE",
+      "code": "E_PARSE",
+      "file": "app.js",
+      "message": "reads or writes cookies"
+    },
+    {
+      "condition": "tracking",
+      "rule": "TRK-SIGN-IN",
+      "code": "E_PARSE",
+      "file": "index.html",
+      "message": "the page asks for a password"
+    },
+    {
+      "condition": "examples",
+      "rule": "EX-MISMATCH",
+      "code": "E_PARSE",
+      "file": "examples.json",
+      "message": "the case boundary-last-day-of-first-tier did not give the expected result"
+    },
+    {
+      "condition": "citations",
+      "rule": "CIT-LICENSE-MISSING",
+      "code": "E_PARSE",
+      "message": "the bundle has no LICENSE file"
+    },
+    {
+      "condition": "citations",
+      "rule": "CIT-MISSING",
+      "code": "E_PARSE",
+      "message": "the calculation storage-fee has no complete citation"
+    },
+    {
+      "condition": "citations",
+      "rule": "CIT-DISCLAIMER",
+      "code": "E_PARSE",
+      "file": "index.html",
+      "message": "the page has no non-advice disclaimer"
+    },
+    {
+      "condition": "citations",
+      "rule": "CIT-INCOMPLETE",
+      "code": "E_PARSE",
+      "file": "index.html",
+      "message": "a citation needs a calculation, a regulation, a paragraph, a revision date written YYYY-MM-DD, and text"
+    }
+  ]
+}

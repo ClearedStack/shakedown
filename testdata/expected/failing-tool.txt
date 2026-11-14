@@ -1,0 +1,24 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    fail
+csp        fail
+tracking   fail
+examples   fail
+citations  fail
+
+verdict    fail
+
+findings:
+  offline   E_PARSE         OFF-NETWORK-API            app.js: uses fetch, which reaches the network after the page has loaded
+  offline   E_PARSE         OFF-REMOTE-STRING          app.js: contains an address outside the bundle
+  offline   E_PARSE         OFF-REMOTE-REFERENCE       index.html: loads or submits to an address outside the bundle
+  csp       E_PARSE         CSP-CONNECT-SRC            index.html: connect-src must be exactly 'self'
+  csp       E_PARSE         CSP-DEFAULT-SRC            index.html: default-src must be exactly 'self'
+  csp       E_PARSE         CSP-FORM-ACTION            index.html: form-action must be exactly 'none'
+  tracking  E_PARSE         TRK-COOKIE                 app.js: reads or writes cookies
+  tracking  E_PARSE         TRK-SIGN-IN                index.html: the page asks for a password
+  examples  E_PARSE         EX-MISMATCH                examples.json: the case boundary-last-day-of-first-tier did not give the expected result
+  citations E_PARSE         CIT-LICENSE-MISSING        the bundle has no LICENSE file
+  citations E_PARSE         CIT-MISSING                the calculation storage-fee has no complete citation
+  citations E_PARSE         CIT-DISCLAIMER             index.html: the page has no non-advice disclaimer
+  citations E_PARSE         CIT-INCOMPLETE             index.html: a citation needs a calculation, a regulation, a paragraph, a revision date written YYYY-MM-DD, and text

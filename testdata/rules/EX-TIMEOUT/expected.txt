@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        pass
+tracking   pass
+examples   timeout
+citations  pass
+
+verdict    timeout
+
+findings:
+  examples  E_TIMEOUT       EX-TIMEOUT                 examples.json: the case worked-twelve-crates-forty-five-days did not finish before its deadline

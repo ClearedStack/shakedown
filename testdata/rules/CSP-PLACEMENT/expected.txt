@@ -1,0 +1,12 @@
+shakedown v0.1.0-draft (contract v1)
+
+offline    pass
+csp        fail
+tracking   pass
+examples   pass
+citations  pass
+
+verdict    fail
+
+findings:
+  csp       E_PARSE         CSP-PLACEMENT              extra.html: the policy must sit in the head, before anything that loads
