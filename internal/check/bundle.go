@@ -278,3 +278,14 @@ func (b *bundle) classifyRef(from, raw string) refKind {
 	}
 	return refMissing
 }
+
+func (b *bundle) resolveLocalRef(from, raw string) (string, bool) {
+	if b.classifyRef(from, raw) != refLocal {
+		return "", false
+	}
+	v := strings.Trim(raw, " \t\r\n\f")
+	if i := strings.IndexAny(v, "?#"); i >= 0 {
+		v = v[:i]
+	}
+	return path.Join(path.Dir(from), v), true
+}

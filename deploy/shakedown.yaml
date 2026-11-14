@@ -65,6 +65,10 @@ spec:
           image: lazarette.clearedstack.svc.cluster.local:5000/shakedown@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           args: ["run"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
           env:
             - name: CONTRACT_VERSION
               value: v1
@@ -74,6 +78,20 @@ spec:
               value: http://muster.clearedstack.svc.cluster.local:8080
             - name: SHAKEDOWN_SPOOL_DIR
               value: /var/spool/cs
+            - name: SHAKEDOWN_LISTEN_ADDR
+              value: ":8080"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
           resources:
             requests:
               cpu: 10m

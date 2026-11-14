@@ -12,4 +12,5 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w
+      - -s
+      - -w

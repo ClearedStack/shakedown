@@ -24,20 +24,20 @@ const (
 	tokTemplateNoSub  // `...`
 	tokRegex
 
-	tokLParen    // (
-	tokRParen    // )
-	tokLBrace    // {
-	tokRBrace    // }
-	tokLBracket  // [
-	tokRBracket  // ]
-	tokSemi      // ;
-	tokComma     // ,
-	tokDot       // .
-	tokOptChain  // ?.
-	tokColon     // :
-	tokQuestion  // ?
-	tokNullish   // ??
-	tokArrow     // =>
+	tokLParen   // (
+	tokRParen   // )
+	tokLBrace   // {
+	tokRBrace   // }
+	tokLBracket // [
+	tokRBracket // ]
+	tokSemi     // ;
+	tokComma    // ,
+	tokDot      // .
+	tokOptChain // ?.
+	tokColon    // :
+	tokQuestion // ?
+	tokNullish  // ??
+	tokArrow    // =>
 
 	tokAssign    // =
 	tokPlusEq    // +=
@@ -55,25 +55,25 @@ const (
 	tokInc      // ++
 	tokDec      // --
 
-	tokBang      // !
-	tokTilde     // ~
-	tokAmp       // &
-	tokPipe      // |
-	tokCaret     // ^
-	tokLShift    // <<
-	tokRShift    // >>
-	tokURShift   // >>>
-	tokAndAnd    // &&
-	tokOrOr      // ||
+	tokBang    // !
+	tokTilde   // ~
+	tokAmp     // &
+	tokPipe    // |
+	tokCaret   // ^
+	tokLShift  // <<
+	tokRShift  // >>
+	tokURShift // >>>
+	tokAndAnd  // &&
+	tokOrOr    // ||
 
-	tokEqEq     // ==
-	tokNotEq    // !=
-	tokEqEqEq   // ===
-	tokNotEqEq  // !==
-	tokLt       // <
-	tokLtEq     // <=
-	tokGt       // >
-	tokGtEq     // >=
+	tokEqEq    // ==
+	tokNotEq   // !=
+	tokEqEqEq  // ===
+	tokNotEqEq // !==
+	tokLt      // <
+	tokLtEq    // <=
+	tokGt      // >
+	tokGtEq    // >=
 
 	// Keywords
 	tokVar

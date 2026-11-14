@@ -20,9 +20,10 @@ Like every worker in the pipeline, Shakedown is a 100% deterministic Go service 
 | **Namespace** | `cs-workers` |
 | **Kind** | `worker` (100% deterministic Go, zero runtime AI) |
 | **Version** | `v0.1.0-draft` |
-| **RAM Budget** | `30 MiB` |
+| **RAM Budget** | `30 MiB` (`24 MiB` programmatic Go heap cap via `debug.SetMemoryLimit`) |
+| **Health Probe** | `:8080/healthz` (`GET`/`HEAD`, compatible with Shipkeeper TCP/HTTP readiness probes) |
 | **Sub-Tools** | None (`[]`: universal 5-condition checks) |
-| **Local Spool** | `/var/spool/cs` (persists completed results across Muster restarts) |
+| **Local Spool** | `/var/spool/cs` (persists completed results across Muster restarts; bounded single-slot in-memory fallback on unmounted read-only rootfs) |
 | **Contract Version** | `CONTRACT_VERSION=v1` (owned by `clearedstack.com`) |
 
 Shakedown runs under the Standard Kubernetes priority class so it yields cleanly if High-priority control-plane pods (Logbook, Muster, Conn, Plainforge, Lazarette, Shipkeeper) need memory on a 4 GiB `k3s` node.
@@ -36,7 +37,7 @@ Shakedown never connects directly to Logbook or holds database credentials. It p
    - **Offline execution:** Confirms the tool loads once and operates with the network disconnected, inspecting HTML, CSS, JavaScript, JSON, and Markdown (`.md`) files so all lookup tables, rates, assets, and regulatory dates resolve inside the repository (permitting external URLs only on passive links and declared `data/tool.json` citation URLs in `js/data.js`, plus integrity checks on `moldloft.json` SHA-256 digests).
    - **Strict Content Security Policy:** Verifies `connect-src 'self'`, `default-src 'self'`, and `form-action 'none'` so the browser blocks any outbound data transfer or remote asset fetch.
    - **Zero tracking or accounts:** Confirms zero sign-in walls, analytics scripts, cookies, visitor counters, or third-party beacons, and verifies any local browser storage usage is disclosed with a clear-data control.
-   - **Worked-example assertions:** Executes hand-calculated worked examples, boundary edge cases, and synthetic test fixtures across all four stack templates (`calculator`, `checklist`, `validator`, `decision-tree`) inside Shakedown's deterministic, memory-capped Go JavaScript interpreter (`internal/js`), including `data/tool.json` <-> `js/data.js` and `tests/worked-examples.json` <-> `tests/worked-examples.js` mirror checks.
+   - **Worked-example and DOM UI assertions:** Executes hand-calculated worked examples, boundary edge cases, and synthetic test fixtures across all four stack templates (`calculator`, `checklist`, `validator`, `decision-tree`) inside Shakedown's deterministic, memory-capped Go JavaScript interpreter and bounded DOM (`internal/js`), including `data/tool.json` <-> `js/data.js` and `tests/worked-examples.json` <-> `tests/worked-examples.js` mirror checks, `tests/index.html` (`tests/browser.js`) execution, and live `index.html` (`js/app.js`) form input/output/reset verification.
    - **Citations, scope limits, and MIT license:** Checks that every calculation, checklist item, validator column/table, or decision-tree branch cites its official source and has worked-example coverage, states scope exclusions and a non-advice or footer notice, and includes an MIT `LICENSE` file.
 3. **Output transition:** Stages the signed verification result in `/var/spool/cs` and reports completion to Muster, hand-off ready for Chartroom to transition `building` → `live`. If regulatory ambiguity blocks verification, the item moves to `parked`.
 

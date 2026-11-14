@@ -21,12 +21,12 @@ type exampleCase struct {
 
 // runExamples returns the calculations or cited rules the examples exercise,
 // and whether the examples file could be read at all.
-func (c *checker) runExamples(b *bundle, m *manifest) (map[string]bool, bool) {
+func (c *checker) runExamples(b *bundle, m *manifest, pages map[string]*page) (map[string]bool, bool) {
 	if m == nil {
 		return nil, false
 	}
 	if m.Kind == manifestMoldloft {
-		return c.runMoldloftExamples(b, m)
+		return c.runMoldloftExamples(b, m, pages)
 	}
 	p := m.Examples
 	bad := func(msg string) (map[string]bool, bool) {
@@ -148,7 +148,7 @@ type moldloftCheckResult struct {
 	Problems []string `json:"problems"`
 }
 
-func (c *checker) runMoldloftExamples(b *bundle, m *manifest) (map[string]bool, bool) {
+func (c *checker) runMoldloftExamples(b *bundle, m *manifest, pages map[string]*page) (map[string]bool, bool) {
 	p := m.Examples
 	bad := func(msg string) (map[string]bool, bool) {
 		c.add(Examples, "EX-FILE", EParse, p, msg)
@@ -243,8 +243,10 @@ func (c *checker) runMoldloftExamples(b *bundle, m *manifest) (map[string]bool, 
 		return exercised, true
 	}
 
+	aborted := false
 	for i, mc := range cases {
 		if c.done() {
+			aborted = true
 			break
 		}
 		out, err := c.runMoldloftCase(progs, runnerProg, mc.rawJSON)
@@ -268,11 +270,17 @@ func (c *checker) runMoldloftExamples(b *bundle, m *manifest) (map[string]bool, 
 			}
 		}
 		if i == 0 && err != nil && (errors.Is(err, errLoad) || errors.Is(err, errNoFunction)) {
+			aborted = true
 			break
 		}
 		if interrupted {
+			aborted = true
 			break
 		}
+	}
+
+	if !aborted {
+		c.verifyMoldloftUI(b, m, pages, cases)
 	}
 
 	return exercised, true

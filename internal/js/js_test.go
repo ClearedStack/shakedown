@@ -1,11 +1,17 @@
 package js
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/ClearedStack/shakedown/internal/htmlparse"
 )
 
 func TestParseCollectsIdentifiersAndStrings(t *testing.T) {
@@ -324,3 +330,64 @@ func TestVMMemoryCapsThrowCleanly(t *testing.T) {
 	}
 }
 
+func TestAttachDOMAndPassingTool(t *testing.T) {
+	toolDir := filepath.Join("..", "..", "testdata", "tools", "passing-tool")
+	htmlRaw, err := os.ReadFile(filepath.Join(toolDir, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := htmlparse.Parse(bytes.NewReader(htmlRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vm := NewVM()
+	dom, err := vm.AttachDOM(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	for _, name := range []string{"tables.js", "calc.js", "app.js"} {
+		src, err := os.ReadFile(filepath.Join(toolDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		prog, err := Parse(name, string(src))
+		if err != nil {
+			t.Fatalf("Parse(%s): %v", name, err)
+		}
+		if err := vm.RunProgram(ctx, prog); err != nil {
+			t.Fatalf("RunProgram(%s): %v", name, err)
+		}
+	}
+
+	if err := dom.SetInputValue(ctx, "crates", "10"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dom.SetInputValue(ctx, "days", "45"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dom.Click(ctx, "go"); err != nil {
+		t.Fatal(err)
+	}
+
+	resText := dom.ElementByID("result").TextContent()
+	if !strings.HasPrefix(resText, "Fee: ") {
+		t.Fatalf("result text = %q, want Fee: ...", resText)
+	}
+	saved, ok := dom.LocalStorage("crate-storage-fee")
+	if !ok || !strings.Contains(saved, `"crates":10`) {
+		t.Fatalf("localStorage = %q (ok=%v), want saved JSON", saved, ok)
+	}
+
+	if err := dom.Click(ctx, "clear"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := dom.LocalStorage("crate-storage-fee"); ok {
+		t.Fatal("expected localStorage entry to be removed by #clear click")
+	}
+	if got := dom.ElementByID("result").TextContent(); got != "Saved data cleared." {
+		t.Fatalf("result text after clear = %q, want Saved data cleared.", got)
+	}
+}

@@ -623,5 +623,51 @@ func TestMoldloftTamperAndMarkdownChecks(t *testing.T) {
 		r := Map(context.Background(), files, Options{})
 		assertHasRule(t, r, Fail, "EX-UNTESTED")
 	})
-}
 
+	t.Run("missing_dom_id_in_index_html_fails_ui_harness", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "calculator-rate-buildup"))
+		files["index.html"] = bytes.Replace(files["index.html"], []byte(`id="out-total"`), []byte(`id="out-missing"`), 1)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "EX-THREW")
+	})
+
+	t.Run("tampered_app_js_wrong_dom_output_fails_ui_harness", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "checklist-solicitation-review"))
+		files["js/app.js"] = bytes.Replace(
+			files["js/app.js"],
+			[]byte(`el("out-status").textContent = result.status;`),
+			[]byte(`el("out-status").textContent = "tampered";`),
+			1,
+		)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "EX-MISMATCH")
+	})
+
+	t.Run("tampered_browser_js_runner_fails_ui_harness", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "validator-line-code-check"))
+		files["tests/browser.js"] = bytes.Replace(
+			files["tests/browser.js"],
+			[]byte(`summary.className = failed === 0 ? "pass" : "fail";`),
+			[]byte(`summary.className = "fail";`),
+			1,
+		)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "EX-MISMATCH")
+	})
+
+	t.Run("throwing_app_js_on_reset_fails_ui_harness", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "decision-tree-clause-routing"))
+		files["js/app.js"] = bytes.Replace(
+			files["js/app.js"],
+			[]byte(`setTimeout(recompute, 0);`),
+			[]byte(`setTimeout(function () { throw new Error("boom"); }, 0);`),
+			1,
+		)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "EX-THREW")
+	})
+}

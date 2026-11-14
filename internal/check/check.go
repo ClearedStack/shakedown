@@ -82,7 +82,7 @@ func (c *checker) runBundle(b *bundle) Report {
 
 	c.checkPolicies(pages)
 	c.checkTracking(pages[entry], entry, scripts)
-	calcs, examplesRead := c.runExamples(b, m)
+	calcs, examplesRead := c.runExamples(b, m, pages)
 	c.checkCitations(b, m, pages, entry, calcs, examplesRead)
 
 	return buildReport(c.findings)

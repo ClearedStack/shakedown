@@ -94,6 +94,7 @@ func fnVal(f *jsFunc) value    { return value{kind: kindFunction, fn: f} }
 type jsObject struct {
 	props map[string]value
 	order []string
+	dom   *domNode
 }
 
 func newObject() *jsObject {
@@ -1346,6 +1347,11 @@ func (vm *VM) getProperty(obj value, key value) (value, *flow) {
 
 	switch obj.kind {
 	case kindObject:
+		if obj.obj.dom != nil {
+			if v, ok, f := vm.getDOMProp(obj.obj.dom, prop); f != nil || ok {
+				return v, f
+			}
+		}
 		if v, ok := obj.obj.get(prop); ok {
 			return v, nil
 		}
@@ -1403,6 +1409,11 @@ func (vm *VM) setProperty(obj value, key value, val value) *flow {
 	prop := toString(key)
 	switch obj.kind {
 	case kindObject:
+		if obj.obj.dom != nil {
+			if handled, f := vm.setDOMProp(obj.obj.dom, prop, val); f != nil || handled {
+				return f
+			}
+		}
 		return vm.setObjProp(obj.obj, prop, val)
 	case kindArray:
 		if prop == "length" {
@@ -3853,4 +3864,3 @@ func stringifyValue(vm *VM, v value) (string, bool, *flow) {
 	}
 	return buf.String(), true, nil
 }
-
