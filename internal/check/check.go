@@ -76,13 +76,14 @@ func (c *checker) runBundle(b *bundle) Report {
 		entry = m.Entry
 	}
 	pages := c.scanPages(b)
-	scripts := c.scanScripts(b)
+	c.scanMarkdown(b)
+	scripts := c.scanScripts(b, m)
 	c.scanStyles(b)
 
 	c.checkPolicies(pages)
 	c.checkTracking(pages[entry], entry, scripts)
 	calcs, examplesRead := c.runExamples(b, m)
-	c.checkCitations(b, pages, entry, calcs, examplesRead)
+	c.checkCitations(b, m, pages, entry, calcs, examplesRead)
 
 	return buildReport(c.findings)
 }

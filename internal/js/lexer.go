@@ -16,6 +16,7 @@ const (
 	tokEOF tokenKind = iota
 	tokIdent
 	tokNumber
+	tokBigInt
 	tokString
 	tokTemplateHead   // `...${
 	tokTemplateMiddle // }...${
@@ -186,7 +187,7 @@ func (l *lexer) canStartRegex() bool {
 		return true
 	}
 	switch l.prevKind {
-	case tokIdent, tokNumber, tokString, tokTemplateNoSub, tokTemplateTail,
+	case tokIdent, tokNumber, tokBigInt, tokString, tokTemplateNoSub, tokTemplateTail,
 		tokRegex, tokTrue, tokFalse, tokNull, tokThis,
 		tokRParen, tokRBracket, tokInc, tokDec:
 		return false
@@ -280,11 +281,7 @@ func (l *lexer) next() (token, error) {
 	}
 
 	if (c >= '0' && c <= '9') || (c == '.' && l.pos+1 < len(l.src) && l.src[l.pos+1] >= '0' && l.src[l.pos+1] <= '9') {
-		num, raw, err := l.scanNumber()
-		if err != nil {
-			return token{}, err
-		}
-		return token{kind: tokNumber, lit: raw, num: num, newline: newline, pos: start}, nil
+		return l.scanNumericToken(start, newline)
 	}
 
 	if isIdentStartByte(c) || c >= 0x80 {
@@ -478,8 +475,7 @@ func (l *lexer) scanIdent() (string, error) {
 	return l.src[start:l.pos], nil
 }
 
-func (l *lexer) scanNumber() (float64, string, error) {
-	start := l.pos
+func (l *lexer) scanNumericToken(start int, newline bool) (token, error) {
 	if l.src[l.pos] == '0' && l.pos+1 < len(l.src) && (l.src[l.pos+1] == 'x' || l.src[l.pos+1] == 'X') {
 		l.pos += 2
 		hexStart := l.pos
@@ -487,28 +483,40 @@ func (l *lexer) scanNumber() (float64, string, error) {
 			l.pos++
 		}
 		if l.pos == hexStart {
-			return 0, "", fmt.Errorf("invalid hex literal")
+			return token{}, fmt.Errorf("invalid hex literal")
+		}
+		if l.pos < len(l.src) && l.src[l.pos] == 'n' {
+			raw := l.src[start:l.pos]
+			l.pos++
+			if l.pos < len(l.src) && isIdentPartByte(l.src[l.pos]) {
+				return token{}, fmt.Errorf("invalid identifier immediately after bigint")
+			}
+			return token{kind: tokBigInt, lit: raw, newline: newline, pos: start}, nil
 		}
 		u, err := strconv.ParseUint(l.src[hexStart:l.pos], 16, 64)
 		if err != nil {
-			return 0, "", err
+			return token{}, err
 		}
 		if l.pos < len(l.src) && isIdentStartByte(l.src[l.pos]) {
-			return 0, "", fmt.Errorf("invalid identifier immediately after number")
+			return token{}, fmt.Errorf("invalid identifier immediately after number")
 		}
-		return float64(u), l.src[start:l.pos], nil
+		return token{kind: tokNumber, lit: l.src[start:l.pos], num: float64(u), newline: newline, pos: start}, nil
 	}
 
+	hasDot := false
+	hasExp := false
 	for l.pos < len(l.src) && l.src[l.pos] >= '0' && l.src[l.pos] <= '9' {
 		l.pos++
 	}
 	if l.pos < len(l.src) && l.src[l.pos] == '.' {
+		hasDot = true
 		l.pos++
 		for l.pos < len(l.src) && l.src[l.pos] >= '0' && l.src[l.pos] <= '9' {
 			l.pos++
 		}
 	}
 	if l.pos < len(l.src) && (l.src[l.pos] == 'e' || l.src[l.pos] == 'E') {
+		hasExp = true
 		l.pos++
 		if l.pos < len(l.src) && (l.src[l.pos] == '+' || l.src[l.pos] == '-') {
 			l.pos++
@@ -518,18 +526,29 @@ func (l *lexer) scanNumber() (float64, string, error) {
 			l.pos++
 		}
 		if l.pos == expStart {
-			return 0, "", fmt.Errorf("invalid exponent")
+			return token{}, fmt.Errorf("invalid exponent")
 		}
 	}
+	if !hasDot && !hasExp && l.pos < len(l.src) && l.src[l.pos] == 'n' {
+		raw := l.src[start:l.pos]
+		if len(raw) > 1 && raw[0] == '0' {
+			return token{}, fmt.Errorf("invalid leading zero in bigint literal")
+		}
+		l.pos++
+		if l.pos < len(l.src) && isIdentPartByte(l.src[l.pos]) {
+			return token{}, fmt.Errorf("invalid identifier immediately after bigint")
+		}
+		return token{kind: tokBigInt, lit: raw, newline: newline, pos: start}, nil
+	}
 	if l.pos < len(l.src) && isIdentStartByte(l.src[l.pos]) {
-		return 0, "", fmt.Errorf("invalid identifier immediately after number")
+		return token{}, fmt.Errorf("invalid identifier immediately after number")
 	}
 	raw := l.src[start:l.pos]
 	f, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
-		return 0, "", err
+		return token{}, err
 	}
-	return f, raw, nil
+	return token{kind: tokNumber, lit: raw, num: f, newline: newline, pos: start}, nil
 }
 
 func (l *lexer) scanString(quote byte) (string, error) {

@@ -1214,6 +1214,9 @@ func (p *parser) parsePrimaryExpr() (expr, error) {
 	case tokNumber:
 		p.next()
 		return &literalExpr{kind: tokNumber, num: t.num}, nil
+	case tokBigInt:
+		p.next()
+		return &literalExpr{kind: tokBigInt, str: t.lit}, nil
 	case tokString:
 		p.next()
 		p.noteString(t.lit)

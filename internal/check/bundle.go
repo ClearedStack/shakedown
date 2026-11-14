@@ -20,8 +20,9 @@ const (
 )
 
 const (
-	manifestName = "shakedown.json"
-	licenseName  = "LICENSE"
+	manifestName         = "shakedown.json"
+	moldloftManifestName = "moldloft.json"
+	licenseName          = "LICENSE"
 )
 
 // ErrUnreadable is returned when the folder itself cannot be opened. It says
@@ -31,7 +32,7 @@ var ErrUnreadable = errors.New("the folder could not be read")
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$`)
 
 // knownExt lists the file types the suite has rules for.
-var knownExt = map[string]bool{".html": true, ".js": true, ".css": true, ".json": true, ".txt": true, ".png": true}
+var knownExt = map[string]bool{".html": true, ".js": true, ".css": true, ".json": true, ".txt": true, ".md": true, ".png": true}
 
 type bundle struct {
 	exists map[string]bool   // every regular file with an acceptable name

@@ -1,0 +1,86 @@
+{
+  "generator": "moldloft",
+  "generator_version": "v0.1.0-draft",
+  "contract_version": "v1",
+  "template": "calculator",
+  "item_id": "item-sample-0002",
+  "slug": "sample-order-amount",
+  "spec_sha256": "18f032e60c739bdf6f3418d005cfd7341c6a2a8d62f322f664158c7f37511d96",
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 1077,
+      "sha256": "13d42f8cf5db0e0c0c6a5bd224925995f9f6c65fcaf99af5ac98adf248a887e2"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2289,
+      "sha256": "763e2af7ec9ab37d00e2cc3206d53aa45e0a06de9cffd45458d2dd134d9c4fee"
+    },
+    {
+      "path": "css/style.css",
+      "bytes": 2910,
+      "sha256": "4a8e79fd219c7755912d25460dc2a728570d69932e9d5e5f7f3d75539ce5bb4f"
+    },
+    {
+      "path": "data/tool.json",
+      "bytes": 1599,
+      "sha256": "bb85513f1c7f7cd5f5eab14b1f8578f75c0376ae773b662d570fcfd6cec0aa1c"
+    },
+    {
+      "path": "index.html",
+      "bytes": 3829,
+      "sha256": "908ae0690c58478ae70900caebdc88c689dbef4b9ca213ea117ecfa96ebaeb3f"
+    },
+    {
+      "path": "js/app.js",
+      "bytes": 2499,
+      "sha256": "0dba5032abd57ac46ffaae2061cb84838fdc78fa03735ffb8118c9511ed223e7"
+    },
+    {
+      "path": "js/data.js",
+      "bytes": 1691,
+      "sha256": "803a2157f5efd80b603748f9d7ddd8c022bdcaa09c2d8a9e3258f5240465238d"
+    },
+    {
+      "path": "js/decimal.js",
+      "bytes": 3067,
+      "sha256": "c671990ce67344f22a8af117e4f6f89e6d1f3ffac0be60147e4043364cd52fc2"
+    },
+    {
+      "path": "js/engine.js",
+      "bytes": 3876,
+      "sha256": "05facba3a13e77659005d47249da42afe70108170b46b712e4a967480f599de3"
+    },
+    {
+      "path": "tests/browser.js",
+      "bytes": 968,
+      "sha256": "0c596eed3b02b1c7398c8f480f285c1a7e74ad187b352b817c3d07e87a831f49"
+    },
+    {
+      "path": "tests/check.js",
+      "bytes": 952,
+      "sha256": "4fccf682e61f55f6bfef8fa0b1e01bc0b9a41971b57d55f3b1e5ea8bfdd4a565"
+    },
+    {
+      "path": "tests/index.html",
+      "bytes": 992,
+      "sha256": "fd09bbb755c6ffacbebb4fd1b34f05b8c694dac2151defb2199ec67cac16ad6b"
+    },
+    {
+      "path": "tests/run.js",
+      "bytes": 1468,
+      "sha256": "43b95f1737cea4580a9c2e19d7e5916015a02bc29611d56e1b9310553d85ee7c"
+    },
+    {
+      "path": "tests/worked-examples.js",
+      "bytes": 882,
+      "sha256": "a17820b4ae998fe8fab6f96d80801c949ff28a657026fc3dcb717ba9bbd1a53d"
+    },
+    {
+      "path": "tests/worked-examples.json",
+      "bytes": 786,
+      "sha256": "6f65ec81f1a7d08baa7d1561782dd5d9099e75b3fd586cdd1c6421a2f62692f9"
+    }
+  ]
+}

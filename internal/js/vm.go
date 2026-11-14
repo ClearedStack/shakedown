@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"regexp"
 	"sort"
 	"strconv"
@@ -25,7 +26,17 @@ var ErrRuntime = errors.New("js runtime error")
 // not callable.
 var ErrNoFunction = errors.New("js entry function not defined")
 
-const maxCallStack = 512
+// Deterministic resource bounds keeping every VM well inside the 24 MiB Go
+// heap limit and 30 MiB container ceiling.
+const (
+	maxCallStack   = 512
+	maxStringBytes = 256 << 10
+	maxArrayLen    = 16384
+	maxObjectProps = 4096
+	maxBigIntBits  = 16384
+	maxVMAllocs    = 65536
+	maxJSONDepth   = 128
+)
 
 var fixedClock = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 
@@ -36,22 +47,26 @@ const (
 	kindNull
 	kindBool
 	kindNumber
+	kindBigInt
 	kindString
 	kindObject
 	kindArray
+	kindMap
 	kindFunction
 	kindRegex
 )
 
 type value struct {
-	kind  valueKind
-	b     bool
-	n     float64
-	s     string
-	obj   *jsObject
-	arr   *jsArray
-	fn    *jsFunc
-	rx    *jsRegex
+	kind valueKind
+	b    bool
+	n    float64
+	bi   *big.Int
+	s    string
+	obj  *jsObject
+	arr  *jsArray
+	mp   *jsMap
+	fn   *jsFunc
+	rx   *jsRegex
 }
 
 var (
@@ -69,11 +84,12 @@ func boolVal(b bool) value {
 	return valFalse
 }
 
-func numVal(n float64) value    { return value{kind: kindNumber, n: n} }
-func strVal(s string) value     { return value{kind: kindString, s: s} }
-func objVal(o *jsObject) value  { return value{kind: kindObject, obj: o} }
-func arrVal(a *jsArray) value   { return value{kind: kindArray, arr: a} }
-func fnVal(f *jsFunc) value     { return value{kind: kindFunction, fn: f} }
+func numVal(n float64) value   { return value{kind: kindNumber, n: n} }
+func strVal(s string) value    { return value{kind: kindString, s: s} }
+func objVal(o *jsObject) value { return value{kind: kindObject, obj: o} }
+func arrVal(a *jsArray) value  { return value{kind: kindArray, arr: a} }
+func mapVal(m *jsMap) value    { return value{kind: kindMap, mp: m} }
+func fnVal(f *jsFunc) value    { return value{kind: kindFunction, fn: f} }
 
 type jsObject struct {
 	props map[string]value
@@ -111,6 +127,76 @@ func (o *jsObject) del(k string) {
 
 type jsArray struct {
 	elems []value
+}
+
+type mapEntry struct {
+	key    value
+	val    value
+	active bool
+}
+
+type jsMap struct {
+	entries []mapEntry
+	size    int
+}
+
+func sameValueZero(a, b value) bool {
+	if a.kind == kindNumber && b.kind == kindNumber {
+		if math.IsNaN(a.n) && math.IsNaN(b.n) {
+			return true
+		}
+		return a.n == b.n
+	}
+	return strictEqual(a, b)
+}
+
+func (m *jsMap) findIndex(k value) int {
+	for i := range m.entries {
+		if m.entries[i].active && sameValueZero(m.entries[i].key, k) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *jsMap) get(k value) (value, bool) {
+	if i := m.findIndex(k); i >= 0 {
+		return m.entries[i].val, true
+	}
+	return valUndefined, false
+}
+
+func (m *jsMap) set(vm *VM, k, v value) *flow {
+	if i := m.findIndex(k); i >= 0 {
+		m.entries[i].val = v
+		return nil
+	}
+	if m.size >= maxObjectProps {
+		return vm.throwError("RangeError", "maximum Map size exceeded")
+	}
+	if f := vm.chargeAlloc(1); f != nil {
+		return f
+	}
+	if k.kind == kindNumber && k.n == 0 {
+		k = numVal(0)
+	}
+	m.entries = append(m.entries, mapEntry{key: k, val: v, active: true})
+	m.size++
+	return nil
+}
+
+func (m *jsMap) del(k value) bool {
+	if i := m.findIndex(k); i >= 0 {
+		m.entries[i] = mapEntry{}
+		m.size--
+		return true
+	}
+	return false
+}
+
+func (m *jsMap) clear() {
+	m.entries = nil
+	m.size = 0
 }
 
 type nativeFn func(vm *VM, thisVal value, args []value) (value, *flow)
@@ -189,6 +275,8 @@ type VM struct {
 	ctx       context.Context
 	steps     uint64
 	callDepth int
+	allocs    int
+	inNew     bool
 }
 
 // NewVM constructs a fresh isolated VM with deterministic standard built-ins.
@@ -199,7 +287,69 @@ func NewVM() *VM {
 		ctx:       context.Background(),
 	}
 	vm.installBuiltins()
+	vm.allocs = 0
 	return vm
+}
+
+func (vm *VM) chargeAlloc(n int) *flow {
+	if n <= 0 {
+		n = 1
+	}
+	if vm.allocs+n > maxVMAllocs {
+		return vm.throwError("RangeError", "maximum VM allocation budget exceeded")
+	}
+	vm.allocs += n
+	return nil
+}
+
+func (vm *VM) makeString(s string) (value, *flow) {
+	if len(s) > maxStringBytes {
+		return valUndefined, vm.throwError("RangeError", "maximum string length exceeded")
+	}
+	if len(s) > 64 {
+		if f := vm.chargeAlloc(1 + len(s)/4096); f != nil {
+			return valUndefined, f
+		}
+	}
+	return strVal(s), nil
+}
+
+func (vm *VM) makeArray(elems []value) (value, *flow) {
+	if len(elems) > maxArrayLen {
+		return valUndefined, vm.throwError("RangeError", "maximum array length exceeded")
+	}
+	if f := vm.chargeAlloc(1 + len(elems)/64); f != nil {
+		return valUndefined, f
+	}
+	return arrVal(&jsArray{elems: elems}), nil
+}
+
+func (vm *VM) newCheckedObject() (*jsObject, *flow) {
+	if f := vm.chargeAlloc(1); f != nil {
+		return nil, f
+	}
+	return newObject(), nil
+}
+
+func (vm *VM) setObjProp(o *jsObject, k string, v value) *flow {
+	if _, exists := o.props[k]; !exists && len(o.order) >= maxObjectProps {
+		return vm.throwError("RangeError", "maximum object property count exceeded")
+	}
+	o.set(k, v)
+	if o == vm.globalObj {
+		vm.global.declare(k, v, false)
+	}
+	return nil
+}
+
+func (vm *VM) makeBigInt(z *big.Int) (value, *flow) {
+	if z.BitLen() > maxBigIntBits {
+		return valUndefined, vm.throwError("RangeError", "maximum BigInt size exceeded")
+	}
+	if f := vm.chargeAlloc(1); f != nil {
+		return valUndefined, f
+	}
+	return value{kind: kindBigInt, bi: z}, nil
 }
 
 func (vm *VM) defGlobal(name string, v value) {
@@ -276,11 +426,46 @@ func (vm *VM) CallJSON(ctx context.Context, fnName string, inputJSON []byte) (st
 	if !ok || b.val.kind != kindFunction {
 		return "", ErrNoFunction
 	}
-	arg, err := parseJSONValue(inputJSON)
+	arg, err := vm.parseJSONValueChecked(inputJSON)
 	if err != nil {
 		return "", fmt.Errorf("%w: invalid input JSON", ErrRuntime)
 	}
 	res, f := vm.callFunction(b.val.fn, valUndefined, []value{arg})
+	if f != nil {
+		return "", vm.flowToError(f)
+	}
+	if res.kind == kindUndefined || res.kind == kindFunction {
+		return "", nil
+	}
+	out, ok, f := stringifyValue(vm, res)
+	if f != nil {
+		return "", vm.flowToError(f)
+	}
+	if !ok {
+		return "", nil
+	}
+	return out, nil
+}
+
+// EvalJSON parses and evaluates exprSrc inside vm and returns JSON.stringify of
+// its resulting value (or "" when undefined).
+func (vm *VM) EvalJSON(ctx context.Context, exprSrc string) (string, error) {
+	vm.ctx = ctx
+	if err := ctx.Err(); err != nil {
+		return "", ErrInterrupted
+	}
+	prog, err := Parse("<eval>", "("+exprSrc+");")
+	if err != nil {
+		return "", err
+	}
+	if len(prog.body) != 1 {
+		return "", ErrSyntax
+	}
+	es, ok := prog.body[0].(*exprStmt)
+	if !ok {
+		return "", ErrSyntax
+	}
+	res, f := vm.evalExpr(es.expr, vm.global)
 	if f != nil {
 		return "", vm.flowToError(f)
 	}
@@ -334,6 +519,9 @@ func (vm *VM) callFunction(fn *jsFunc, thisVal value, args []value) (value, *flo
 		return fn.native(vm, thisVal, args)
 	}
 
+	if f := vm.chargeAlloc(1); f != nil {
+		return valUndefined, f
+	}
 	callEnv := newEnv(fn.closure)
 	if fn.name != "" {
 		callEnv.declare(fn.name, fnVal(fn), false)
@@ -341,7 +529,11 @@ func (vm *VM) callFunction(fn *jsFunc, thisVal value, args []value) (value, *flo
 	callEnv.declare("this", thisVal, false)
 	argElems := make([]value, len(args))
 	copy(argElems, args)
-	callEnv.declare("arguments", arrVal(&jsArray{elems: argElems}), false)
+	argArr, af := vm.makeArray(argElems)
+	if af != nil {
+		return valUndefined, af
+	}
+	callEnv.declare("arguments", argArr, false)
 
 	for i, p := range fn.params {
 		v := valUndefined
@@ -408,7 +600,7 @@ func (vm *VM) execStmt(st stmt, scope *env) *flow {
 						return vm.throwTypeError("assignment to constant variable")
 					}
 					b.val = val
-					if scope == vm.global {
+					if b == vm.global.vars[d.name] {
 						vm.globalObj.set(d.name, val)
 					}
 				} else {
@@ -536,6 +728,16 @@ func (vm *VM) execStmt(st stmt, scope *env) *flow {
 			case kindString:
 				for _, r := range rhsVal.s {
 					items = append(items, strVal(string(r)))
+				}
+			case kindMap:
+				for _, entry := range rhsVal.mp.entries {
+					if entry.active {
+						pair, pf := vm.makeArray([]value{entry.key, entry.val})
+						if pf != nil {
+							return pf
+						}
+						items = append(items, pair)
+					}
 				}
 			default:
 				return vm.throwTypeError("value is not iterable")
@@ -675,6 +877,9 @@ func (vm *VM) assignIdent(name string, val value, scope *env) *flow {
 		}
 		return nil
 	}
+	if len(vm.globalObj.order) >= maxObjectProps {
+		return vm.throwError("RangeError", "maximum object property count exceeded")
+	}
 	vm.defGlobal(name, val)
 	return nil
 }
@@ -690,7 +895,16 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 		switch e.kind {
 		case tokNumber:
 			return numVal(e.num), nil
+		case tokBigInt:
+			z, ok := parseBigIntString(e.str)
+			if !ok {
+				return valUndefined, vm.throwError("SyntaxError", "invalid BigInt literal")
+			}
+			return vm.makeBigInt(z)
 		case tokString:
+			if len(e.str) > maxStringBytes {
+				return valUndefined, vm.throwError("RangeError", "maximum string length exceeded")
+			}
 			return strVal(e.str), nil
 		case tokTrue:
 			return valTrue, nil
@@ -716,6 +930,9 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 		}
 		return objVal(vm.globalObj), nil
 	case *arrayExpr:
+		if len(e.elems) > maxArrayLen {
+			return valUndefined, vm.throwError("RangeError", "maximum array length exceeded")
+		}
 		elems := make([]value, 0, len(e.elems))
 		for _, item := range e.elems {
 			v, f := vm.evalExpr(item, scope)
@@ -724,9 +941,12 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 			}
 			elems = append(elems, v)
 		}
-		return arrVal(&jsArray{elems: elems}), nil
+		return vm.makeArray(elems)
 	case *objectExpr:
-		o := newObject()
+		o, of := vm.newCheckedObject()
+		if of != nil {
+			return valUndefined, of
+		}
 		for _, prop := range e.props {
 			k := prop.key
 			if prop.computed != nil {
@@ -740,22 +960,35 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 			if f != nil {
 				return valUndefined, f
 			}
-			o.set(k, v)
+			if sf := vm.setObjProp(o, k, v); sf != nil {
+				return valUndefined, sf
+			}
 		}
 		return objVal(o), nil
 	case *templateExpr:
 		var b strings.Builder
+		if len(e.quasis[0]) > maxStringBytes {
+			return valUndefined, vm.throwError("RangeError", "maximum string length exceeded")
+		}
 		b.WriteString(e.quasis[0])
 		for i, sub := range e.exprs {
 			v, f := vm.evalExpr(sub, scope)
 			if f != nil {
 				return valUndefined, f
 			}
-			b.WriteString(toString(v))
-			b.WriteString(e.quasis[i+1])
+			part := toString(v)
+			nextQ := e.quasis[i+1]
+			if b.Len()+len(part)+len(nextQ) > maxStringBytes {
+				return valUndefined, vm.throwError("RangeError", "maximum string length exceeded")
+			}
+			b.WriteString(part)
+			b.WriteString(nextQ)
 		}
-		return strVal(b.String()), nil
+		return vm.makeString(b.String())
 	case *funcExpr:
+		if f := vm.chargeAlloc(1); f != nil {
+			return valUndefined, f
+		}
 		return fnVal(&jsFunc{
 			name:        e.name,
 			params:      e.params,
@@ -827,17 +1060,27 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 			args = append(args, av)
 		}
 		if e.isNew {
-			inst := newObject()
+			inst, inf := vm.newCheckedObject()
+			if inf != nil {
+				return valUndefined, inf
+			}
+			prevNew := vm.inNew
+			vm.inNew = true
 			res, cf := vm.callFunction(fnValOut.fn, objVal(inst), args)
+			vm.inNew = prevNew
 			if cf != nil {
 				return valUndefined, cf
 			}
-			if res.kind == kindObject || res.kind == kindArray || res.kind == kindFunction {
+			if res.kind == kindObject || res.kind == kindArray || res.kind == kindFunction || res.kind == kindMap {
 				return res, nil
 			}
 			return objVal(inst), nil
 		}
-		return vm.callFunction(fnValOut.fn, thisVal, args)
+		prevNew := vm.inNew
+		vm.inNew = false
+		res, cf := vm.callFunction(fnValOut.fn, thisVal, args)
+		vm.inNew = prevNew
+		return res, cf
 	case *unaryExpr:
 		if e.op == tokTypeof {
 			if id, ok := e.arg.(*identExpr); ok {
@@ -870,6 +1113,9 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 				}
 				if obj.kind == kindObject {
 					obj.obj.del(k)
+					if obj.obj == vm.globalObj {
+						delete(vm.global.vars, k)
+					}
 				}
 				return valTrue, nil
 			}
@@ -883,10 +1129,19 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 		case tokBang:
 			return boolVal(!toBool(v)), nil
 		case tokPlus:
+			if v.kind == kindBigInt {
+				return valUndefined, vm.throwTypeError("cannot convert BigInt value to a number")
+			}
 			return numVal(toNumber(v)), nil
 		case tokMinus:
+			if v.kind == kindBigInt {
+				return vm.makeBigInt(new(big.Int).Neg(v.bi))
+			}
 			return numVal(-toNumber(v)), nil
 		case tokTilde:
+			if v.kind == kindBigInt {
+				return vm.makeBigInt(new(big.Int).Not(v.bi))
+			}
 			return numVal(float64(^toInt32(v))), nil
 		case tokVoid:
 			return valUndefined, nil
@@ -895,6 +1150,23 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 		oldVal, setter, f := vm.resolveLValue(e.arg, scope)
 		if f != nil {
 			return valUndefined, f
+		}
+		if oldVal.kind == kindBigInt {
+			delta := big.NewInt(1)
+			if e.op == tokDec {
+				delta.SetInt64(-1)
+			}
+			nextVal, bf := vm.makeBigInt(new(big.Int).Add(oldVal.bi, delta))
+			if bf != nil {
+				return valUndefined, bf
+			}
+			if sf := setter(nextVal); sf != nil {
+				return valUndefined, sf
+			}
+			if e.prefix {
+				return nextVal, nil
+			}
+			return oldVal, nil
 		}
 		oldNum := toNumber(oldVal)
 		newNum := oldNum + 1
@@ -942,17 +1214,21 @@ func (vm *VM) evalExpr(ex expr, scope *env) (value, *flow) {
 			return valUndefined, rf
 		}
 		var next value
+		var opf *flow
 		switch e.op {
 		case tokPlusEq:
-			next = evalAdd(oldVal, rv)
+			next, opf = vm.evalBinaryOp(tokPlus, oldVal, rv)
 		case tokMinusEq:
-			next = numVal(toNumber(oldVal) - toNumber(rv))
+			next, opf = vm.evalBinaryOp(tokMinus, oldVal, rv)
 		case tokStarEq:
-			next = numVal(toNumber(oldVal) * toNumber(rv))
+			next, opf = vm.evalBinaryOp(tokStar, oldVal, rv)
 		case tokSlashEq:
-			next = numVal(toNumber(oldVal) / toNumber(rv))
+			next, opf = vm.evalBinaryOp(tokSlash, oldVal, rv)
 		case tokPercentEq:
-			next = numVal(math.Mod(toNumber(oldVal), toNumber(rv)))
+			next, opf = vm.evalBinaryOp(tokPercent, oldVal, rv)
+		}
+		if opf != nil {
+			return valUndefined, opf
 		}
 		if sf := setter(next); sf != nil {
 			return valUndefined, sf
@@ -1085,6 +1361,11 @@ func (vm *VM) getProperty(obj value, key value) (value, *flow) {
 			return valUndefined, nil
 		}
 		return vm.arrayProtoMethod(prop), nil
+	case kindMap:
+		if prop == "size" {
+			return numVal(float64(obj.mp.size)), nil
+		}
+		return vm.mapProtoMethod(prop), nil
 	case kindString:
 		if prop == "length" {
 			return numVal(float64(utf16Len(obj.s))), nil
@@ -1099,13 +1380,15 @@ func (vm *VM) getProperty(obj value, key value) (value, *flow) {
 		return vm.stringProtoMethod(prop), nil
 	case kindNumber:
 		return vm.numberProtoMethod(prop), nil
+	case kindBigInt:
+		return vm.bigIntProtoMethod(prop), nil
 	case kindFunction:
 		if obj.fn.props != nil {
 			if v, ok := obj.fn.props.get(prop); ok {
 				return v, nil
 			}
 		}
-		return valUndefined, nil
+		return vm.funcProtoMethod(prop), nil
 	case kindRegex:
 		return vm.regexProtoMethod(prop), nil
 	default:
@@ -1120,16 +1403,20 @@ func (vm *VM) setProperty(obj value, key value, val value) *flow {
 	prop := toString(key)
 	switch obj.kind {
 	case kindObject:
-		obj.obj.set(prop, val)
+		return vm.setObjProp(obj.obj, prop, val)
 	case kindArray:
 		if prop == "length" {
-			n := int(toNumber(val))
-			if n < 0 {
+			fn := toNumber(val)
+			n := int(fn)
+			if float64(n) != fn || n < 0 || n > maxArrayLen {
 				return vm.throwError("RangeError", "invalid array length")
 			}
 			if n < len(obj.arr.elems) {
 				obj.arr.elems = obj.arr.elems[:n]
 			} else {
+				if f := vm.chargeAlloc(1 + (n-len(obj.arr.elems))/64); f != nil {
+					return f
+				}
 				for len(obj.arr.elems) < n {
 					obj.arr.elems = append(obj.arr.elems, valUndefined)
 				}
@@ -1137,8 +1424,16 @@ func (vm *VM) setProperty(obj value, key value, val value) *flow {
 			return nil
 		}
 		if idx, ok := parseArrayIndex(prop); ok {
-			for len(obj.arr.elems) <= idx {
-				obj.arr.elems = append(obj.arr.elems, valUndefined)
+			if idx >= maxArrayLen {
+				return vm.throwError("RangeError", "maximum array length exceeded")
+			}
+			if idx >= len(obj.arr.elems) {
+				if f := vm.chargeAlloc(1 + (idx+1-len(obj.arr.elems))/64); f != nil {
+					return f
+				}
+				for len(obj.arr.elems) <= idx {
+					obj.arr.elems = append(obj.arr.elems, valUndefined)
+				}
 			}
 			obj.arr.elems[idx] = val
 		}
@@ -1146,7 +1441,7 @@ func (vm *VM) setProperty(obj value, key value, val value) *flow {
 		if obj.fn.props == nil {
 			obj.fn.props = newObject()
 		}
-		obj.fn.props.set(prop, val)
+		return vm.setObjProp(obj.fn.props, prop, val)
 	}
 	return nil
 }
@@ -1181,6 +1476,91 @@ func utf16Len(s string) int {
 
 // Operators & Conversions
 
+func parseBigIntString(raw string) (*big.Int, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return big.NewInt(0), true
+	}
+	base := 10
+	neg := false
+	digits := s
+	if len(digits) >= 2 && digits[0] == '0' {
+		switch digits[1] {
+		case 'x', 'X':
+			base = 16
+			digits = digits[2:]
+		case 'o', 'O':
+			base = 8
+			digits = digits[2:]
+		case 'b', 'B':
+			base = 2
+			digits = digits[2:]
+		}
+	}
+	if base == 10 && len(digits) > 0 && (digits[0] == '+' || digits[0] == '-') {
+		neg = digits[0] == '-'
+		digits = digits[1:]
+	}
+	if digits == "" {
+		return nil, false
+	}
+	firstNonZero := -1
+	for i := 0; i < len(digits); i++ {
+		d := digitVal(digits[i])
+		if d < 0 || d >= base {
+			return nil, false
+		}
+		if d != 0 && firstNonZero < 0 {
+			firstNonZero = i
+		}
+	}
+	if firstNonZero < 0 {
+		return big.NewInt(0), true
+	}
+	sig := digits[firstNonZero:]
+	maxSig := 5000
+	if base == 2 {
+		maxSig = maxBigIntBits + 2
+	} else if base == 8 {
+		maxSig = (maxBigIntBits / 3) + 4
+	}
+	if len(sig) > maxSig {
+		return new(big.Int).Lsh(big.NewInt(1), maxBigIntBits+1), true
+	}
+	z, ok := new(big.Int).SetString(sig, base)
+	if !ok {
+		return nil, false
+	}
+	if neg {
+		z.Neg(z)
+	}
+	return z, true
+}
+
+func cmpBigIntNumber(bi *big.Int, n float64) (int, bool) {
+	if math.IsNaN(n) {
+		return 0, false
+	}
+	if math.IsInf(n, 1) {
+		return -1, true
+	}
+	if math.IsInf(n, -1) {
+		return 1, true
+	}
+	if bi.BitLen() > 1025 {
+		if bi.Sign() >= 0 {
+			return 1, true
+		}
+		return -1, true
+	}
+	rb := new(big.Rat).SetInt(bi)
+	rn := new(big.Rat).SetFloat64(n)
+	if rn == nil {
+		return 0, false
+	}
+	return rb.Cmp(rn), true
+}
+
 func typeofValue(v value) string {
 	switch v.kind {
 	case kindUndefined:
@@ -1189,6 +1569,8 @@ func typeofValue(v value) string {
 		return "boolean"
 	case kindNumber:
 		return "number"
+	case kindBigInt:
+		return "bigint"
 	case kindString:
 		return "string"
 	case kindFunction:
@@ -1206,6 +1588,8 @@ func toBool(v value) bool {
 		return v.b
 	case kindNumber:
 		return v.n != 0 && !math.IsNaN(v.n)
+	case kindBigInt:
+		return v.bi.Sign() != 0
 	case kindString:
 		return v.s != ""
 	default:
@@ -1277,6 +1661,10 @@ func toUint32(v value) uint32 {
 }
 
 func toString(v value) string {
+	return toStringSeen(v, nil)
+}
+
+func toStringSeen(v value, seen map[*jsArray]bool) string {
 	switch v.kind {
 	case kindUndefined:
 		return "undefined"
@@ -1289,21 +1677,60 @@ func toString(v value) string {
 		return "false"
 	case kindNumber:
 		return formatJSNumber(v.n)
+	case kindBigInt:
+		return v.bi.String()
 	case kindString:
 		return v.s
 	case kindArray:
-		parts := make([]string, len(v.arr.elems))
-		for i, el := range v.arr.elems {
-			if el.kind == kindUndefined || el.kind == kindNull {
-				parts[i] = ""
-			} else {
-				parts[i] = toString(el)
-			}
-		}
-		return strings.Join(parts, ",")
+		s, _ := joinArrayBounded(v.arr, ",", seen, maxStringBytes+1)
+		return s
+	case kindMap:
+		return "[object Map]"
 	default:
 		return "[object Object]"
 	}
+}
+
+func joinArrayBounded(a *jsArray, sep string, seen map[*jsArray]bool, limit int) (string, bool) {
+	if a == nil || len(a.elems) == 0 {
+		return "", true
+	}
+	if seen == nil {
+		seen = make(map[*jsArray]bool)
+	}
+	if seen[a] {
+		return "", true
+	}
+	seen[a] = true
+	defer delete(seen, a)
+
+	var b strings.Builder
+	for i, el := range a.elems {
+		if i > 0 {
+			if b.Len()+len(sep) > limit {
+				return "", false
+			}
+			b.WriteString(sep)
+		}
+		if el.kind == kindUndefined || el.kind == kindNull {
+			continue
+		}
+		var part string
+		if el.kind == kindArray {
+			sub, ok := joinArrayBounded(el.arr, ",", seen, limit-b.Len())
+			if !ok {
+				return "", false
+			}
+			part = sub
+		} else {
+			part = toStringSeen(el, seen)
+		}
+		if b.Len()+len(part) > limit {
+			return "", false
+		}
+		b.WriteString(part)
+	}
+	return b.String(), true
 }
 
 func formatJSNumber(n float64) string {
@@ -1332,20 +1759,41 @@ func formatJSNumber(n float64) string {
 
 func toPrimitive(v value) value {
 	switch v.kind {
-	case kindObject, kindArray, kindFunction, kindRegex:
+	case kindObject, kindArray, kindMap, kindFunction, kindRegex:
 		return strVal(toString(v))
 	default:
 		return v
 	}
 }
 
-func evalAdd(a, b value) value {
+func (vm *VM) evalAdd(a, b value) (value, *flow) {
 	pa := toPrimitive(a)
 	pb := toPrimitive(b)
 	if pa.kind == kindString || pb.kind == kindString {
-		return strVal(toString(pa) + toString(pb))
+		if pa.kind == kindArray {
+			if _, ok := joinArrayBounded(pa.arr, ",", nil, maxStringBytes); !ok {
+				return valUndefined, vm.throwError("RangeError", "maximum string length exceeded")
+			}
+		}
+		if pb.kind == kindArray {
+			if _, ok := joinArrayBounded(pb.arr, ",", nil, maxStringBytes); !ok {
+				return valUndefined, vm.throwError("RangeError", "maximum string length exceeded")
+			}
+		}
+		sa := toString(pa)
+		sb := toString(pb)
+		if len(sa) > maxStringBytes || len(sb) > maxStringBytes || len(sa)+len(sb) > maxStringBytes {
+			return valUndefined, vm.throwError("RangeError", "maximum string length exceeded")
+		}
+		return vm.makeString(sa + sb)
 	}
-	return numVal(toNumber(pa) + toNumber(pb))
+	if pa.kind == kindBigInt && pb.kind == kindBigInt {
+		return vm.makeBigInt(new(big.Int).Add(pa.bi, pb.bi))
+	}
+	if pa.kind == kindBigInt || pb.kind == kindBigInt {
+		return valUndefined, vm.throwTypeError("cannot mix BigInt and other types, use explicit conversions")
+	}
+	return numVal(toNumber(pa) + toNumber(pb)), nil
 }
 
 func strictEqual(a, b value) bool {
@@ -1359,12 +1807,16 @@ func strictEqual(a, b value) bool {
 		return a.b == b.b
 	case kindNumber:
 		return a.n == b.n
+	case kindBigInt:
+		return a.bi.Cmp(b.bi) == 0
 	case kindString:
 		return a.s == b.s
 	case kindObject:
 		return a.obj == b.obj
 	case kindArray:
 		return a.arr == b.arr
+	case kindMap:
+		return a.mp == b.mp
 	case kindFunction:
 		return a.fn == b.fn
 	case kindRegex:
@@ -1381,6 +1833,22 @@ func abstractEqual(a, b value) bool {
 	if (a.kind == kindUndefined && b.kind == kindNull) || (a.kind == kindNull && b.kind == kindUndefined) {
 		return true
 	}
+	if a.kind == kindBigInt && b.kind == kindString {
+		z, ok := parseBigIntString(b.s)
+		return ok && z.BitLen() <= maxBigIntBits && a.bi.Cmp(z) == 0
+	}
+	if a.kind == kindString && b.kind == kindBigInt {
+		z, ok := parseBigIntString(a.s)
+		return ok && z.BitLen() <= maxBigIntBits && z.Cmp(b.bi) == 0
+	}
+	if a.kind == kindBigInt && b.kind == kindNumber {
+		cmp, ok := cmpBigIntNumber(a.bi, b.n)
+		return ok && cmp == 0
+	}
+	if a.kind == kindNumber && b.kind == kindBigInt {
+		cmp, ok := cmpBigIntNumber(b.bi, a.n)
+		return ok && cmp == 0
+	}
 	if a.kind == kindNumber && b.kind == kindString {
 		return a.n == toNumber(b)
 	}
@@ -1393,41 +1861,149 @@ func abstractEqual(a, b value) bool {
 	if b.kind == kindBool {
 		return abstractEqual(a, numVal(toNumber(b)))
 	}
-	if (a.kind == kindString || a.kind == kindNumber) && (b.kind == kindObject || b.kind == kindArray) {
+	if (a.kind == kindString || a.kind == kindNumber || a.kind == kindBigInt) && (b.kind == kindObject || b.kind == kindArray || b.kind == kindMap) {
 		return abstractEqual(a, toPrimitive(b))
 	}
-	if (a.kind == kindObject || a.kind == kindArray) && (b.kind == kindString || b.kind == kindNumber) {
+	if (a.kind == kindObject || a.kind == kindArray || a.kind == kindMap) && (b.kind == kindString || b.kind == kindNumber || b.kind == kindBigInt) {
 		return abstractEqual(toPrimitive(a), b)
 	}
 	return false
 }
 
+func (vm *VM) evalBigIntOp(op tokenKind, a, b *big.Int) (value, *flow) {
+	switch op {
+	case tokMinus:
+		return vm.makeBigInt(new(big.Int).Sub(a, b))
+	case tokStar:
+		if a.Sign() != 0 && b.Sign() != 0 && a.BitLen()+b.BitLen()-1 > maxBigIntBits {
+			return valUndefined, vm.throwError("RangeError", "maximum BigInt size exceeded")
+		}
+		return vm.makeBigInt(new(big.Int).Mul(a, b))
+	case tokSlash:
+		if b.Sign() == 0 {
+			return valUndefined, vm.throwError("RangeError", "division by zero")
+		}
+		return vm.makeBigInt(new(big.Int).Quo(a, b))
+	case tokPercent:
+		if b.Sign() == 0 {
+			return valUndefined, vm.throwError("RangeError", "division by zero")
+		}
+		return vm.makeBigInt(new(big.Int).Rem(a, b))
+	case tokStarStar:
+		if b.Sign() < 0 {
+			return valUndefined, vm.throwError("RangeError", "exponent must be positive")
+		}
+		if b.Sign() == 0 {
+			return vm.makeBigInt(big.NewInt(1))
+		}
+		if a.Sign() == 0 {
+			return vm.makeBigInt(big.NewInt(0))
+		}
+		if a.Cmp(big.NewInt(1)) == 0 {
+			return vm.makeBigInt(big.NewInt(1))
+		}
+		if a.Cmp(big.NewInt(-1)) == 0 {
+			if b.Bit(0) == 1 {
+				return vm.makeBigInt(big.NewInt(-1))
+			}
+			return vm.makeBigInt(big.NewInt(1))
+		}
+		if !b.IsInt64() || b.Int64() > maxBigIntBits {
+			return valUndefined, vm.throwError("RangeError", "maximum BigInt size exceeded")
+		}
+		exp := b.Int64()
+		if int64(a.BitLen()-1)*exp > maxBigIntBits {
+			return valUndefined, vm.throwError("RangeError", "maximum BigInt size exceeded")
+		}
+		return vm.makeBigInt(new(big.Int).Exp(a, b, nil))
+	case tokPipe:
+		return vm.makeBigInt(new(big.Int).Or(a, b))
+	case tokCaret:
+		return vm.makeBigInt(new(big.Int).Xor(a, b))
+	case tokAmp:
+		return vm.makeBigInt(new(big.Int).And(a, b))
+	case tokLShift, tokRShift:
+		shift := new(big.Int).Set(b)
+		if op == tokRShift {
+			shift.Neg(shift)
+		}
+		if shift.Sign() > 0 {
+			if a.Sign() == 0 {
+				return vm.makeBigInt(big.NewInt(0))
+			}
+			if !shift.IsInt64() || shift.Int64()+int64(a.BitLen()) > maxBigIntBits+1 {
+				return valUndefined, vm.throwError("RangeError", "maximum BigInt size exceeded")
+			}
+			return vm.makeBigInt(new(big.Int).Lsh(a, uint(shift.Int64())))
+		}
+		if shift.Sign() < 0 {
+			rsh := new(big.Int).Neg(shift)
+			if !rsh.IsInt64() || rsh.Int64() > int64(a.BitLen())+1 {
+				if a.Sign() < 0 {
+					return vm.makeBigInt(big.NewInt(-1))
+				}
+				return vm.makeBigInt(big.NewInt(0))
+			}
+			return vm.makeBigInt(new(big.Int).Rsh(a, uint(rsh.Int64())))
+		}
+		return vm.makeBigInt(new(big.Int).Set(a))
+	case tokURShift:
+		return valUndefined, vm.throwTypeError("BigInts have no unsigned right shift, use >> instead")
+	}
+	return valUndefined, &flow{kind: flowAbort, err: ErrUnsupported}
+}
+
+func cmpResult(op tokenKind, cmp int) value {
+	switch op {
+	case tokLt:
+		return boolVal(cmp < 0)
+	case tokLtEq:
+		return boolVal(cmp <= 0)
+	case tokGt:
+		return boolVal(cmp > 0)
+	case tokGtEq:
+		return boolVal(cmp >= 0)
+	}
+	return valFalse
+}
+
 func (vm *VM) evalBinaryOp(op tokenKind, a, b value) (value, *flow) {
 	switch op {
 	case tokPlus:
-		return evalAdd(a, b), nil
-	case tokMinus:
-		return numVal(toNumber(a) - toNumber(b)), nil
-	case tokStar:
-		return numVal(toNumber(a) * toNumber(b)), nil
-	case tokSlash:
-		return numVal(toNumber(a) / toNumber(b)), nil
-	case tokPercent:
-		return numVal(math.Mod(toNumber(a), toNumber(b))), nil
-	case tokStarStar:
-		return numVal(math.Pow(toNumber(a), toNumber(b))), nil
-	case tokPipe:
-		return numVal(float64(toInt32(a) | toInt32(b))), nil
-	case tokCaret:
-		return numVal(float64(toInt32(a) ^ toInt32(b))), nil
-	case tokAmp:
-		return numVal(float64(toInt32(a) & toInt32(b))), nil
-	case tokLShift:
-		return numVal(float64(toInt32(a) << (toUint32(b) & 0x1f))), nil
-	case tokRShift:
-		return numVal(float64(toInt32(a) >> (toUint32(b) & 0x1f))), nil
-	case tokURShift:
-		return numVal(float64(toUint32(a) >> (toUint32(b) & 0x1f))), nil
+		return vm.evalAdd(a, b)
+	case tokMinus, tokStar, tokSlash, tokPercent, tokStarStar, tokPipe, tokCaret, tokAmp, tokLShift, tokRShift, tokURShift:
+		pa := toPrimitive(a)
+		pb := toPrimitive(b)
+		if pa.kind == kindBigInt || pb.kind == kindBigInt {
+			if pa.kind != kindBigInt || pb.kind != kindBigInt {
+				return valUndefined, vm.throwTypeError("cannot mix BigInt and other types, use explicit conversions")
+			}
+			return vm.evalBigIntOp(op, pa.bi, pb.bi)
+		}
+		switch op {
+		case tokMinus:
+			return numVal(toNumber(pa) - toNumber(pb)), nil
+		case tokStar:
+			return numVal(toNumber(pa) * toNumber(pb)), nil
+		case tokSlash:
+			return numVal(toNumber(pa) / toNumber(pb)), nil
+		case tokPercent:
+			return numVal(math.Mod(toNumber(pa), toNumber(pb))), nil
+		case tokStarStar:
+			return numVal(math.Pow(toNumber(pa), toNumber(pb))), nil
+		case tokPipe:
+			return numVal(float64(toInt32(pa) | toInt32(pb))), nil
+		case tokCaret:
+			return numVal(float64(toInt32(pa) ^ toInt32(pb))), nil
+		case tokAmp:
+			return numVal(float64(toInt32(pa) & toInt32(pb))), nil
+		case tokLShift:
+			return numVal(float64(toInt32(pa) << (toUint32(pb) & 0x1f))), nil
+		case tokRShift:
+			return numVal(float64(toInt32(pa) >> (toUint32(pb) & 0x1f))), nil
+		case tokURShift:
+			return numVal(float64(toUint32(pa) >> (toUint32(pb) & 0x1f))), nil
+		}
 	case tokEqEq:
 		return boolVal(abstractEqual(a, b)), nil
 	case tokNotEq:
@@ -1450,6 +2026,37 @@ func (vm *VM) evalBinaryOp(op tokenKind, a, b value) (value, *flow) {
 			case tokGtEq:
 				return boolVal(pa.s >= pb.s), nil
 			}
+		}
+		if pa.kind == kindBigInt && pb.kind == kindBigInt {
+			return cmpResult(op, pa.bi.Cmp(pb.bi)), nil
+		}
+		if pa.kind == kindBigInt && pb.kind == kindString {
+			z, ok := parseBigIntString(pb.s)
+			if !ok {
+				return valFalse, nil
+			}
+			return cmpResult(op, pa.bi.Cmp(z)), nil
+		}
+		if pa.kind == kindString && pb.kind == kindBigInt {
+			z, ok := parseBigIntString(pa.s)
+			if !ok {
+				return valFalse, nil
+			}
+			return cmpResult(op, z.Cmp(pb.bi)), nil
+		}
+		if pa.kind == kindBigInt {
+			cmp, ok := cmpBigIntNumber(pa.bi, toNumber(pb))
+			if !ok {
+				return valFalse, nil
+			}
+			return cmpResult(op, cmp), nil
+		}
+		if pb.kind == kindBigInt {
+			cmp, ok := cmpBigIntNumber(pb.bi, toNumber(pa))
+			if !ok {
+				return valFalse, nil
+			}
+			return cmpResult(op, -cmp), nil
 		}
 		na := toNumber(pa)
 		nb := toNumber(pb)
@@ -1488,7 +2095,10 @@ func (vm *VM) evalBinaryOp(op tokenKind, a, b value) (value, *flow) {
 		if b.fn.name == "Array" {
 			return boolVal(a.kind == kindArray), nil
 		}
-		return boolVal(a.kind == kindObject || a.kind == kindArray || a.kind == kindFunction), nil
+		if b.fn.name == "Map" {
+			return boolVal(a.kind == kindMap), nil
+		}
+		return boolVal(a.kind == kindObject || a.kind == kindArray || a.kind == kindMap || a.kind == kindFunction), nil
 	}
 	return valUndefined, &flow{kind: flowAbort, err: ErrUnsupported}
 }
@@ -1503,15 +2113,21 @@ func (vm *VM) installBuiltins() {
 	vm.defGlobal("Infinity", numVal(math.Inf(1)))
 	vm.defGlobal("globalThis", objVal(vm.globalObj))
 
-	vm.defGlobal("isNaN", makeNative("isNaN", func(_ *VM, _ value, args []value) (value, *flow) {
+	vm.defGlobal("isNaN", makeNative("isNaN", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 {
 			return valTrue, nil
 		}
+		if args[0].kind == kindBigInt {
+			return valUndefined, v.throwTypeError("cannot convert BigInt value to a number")
+		}
 		return boolVal(math.IsNaN(toNumber(args[0]))), nil
 	}))
-	vm.defGlobal("isFinite", makeNative("isFinite", func(_ *VM, _ value, args []value) (value, *flow) {
+	vm.defGlobal("isFinite", makeNative("isFinite", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 {
 			return valFalse, nil
+		}
+		if args[0].kind == kindBigInt {
+			return valUndefined, v.throwTypeError("cannot convert BigInt value to a number")
 		}
 		n := toNumber(args[0])
 		return boolVal(!math.IsNaN(n) && !math.IsInf(n, 0)), nil
@@ -1614,6 +2230,10 @@ func (vm *VM) installBuiltins() {
 		if len(args) == 0 {
 			return numVal(0), nil
 		}
+		if args[0].kind == kindBigInt {
+			f, _ := new(big.Float).SetInt(args[0].bi).Float64()
+			return numVal(f), nil
+		}
 		return numVal(toNumber(args[0])), nil
 	})
 	numCtor.fn.props.set("isInteger", makeNative("isInteger", func(_ *VM, _ value, args []value) (value, *flow) {
@@ -1645,12 +2265,56 @@ func (vm *VM) installBuiltins() {
 	numCtor.fn.props.set("MIN_SAFE_INTEGER", numVal(-9007199254740991))
 	vm.defGlobal("Number", numCtor)
 
+	// BigInt
+	vm.defGlobal("BigInt", makeNative("BigInt", func(v *VM, _ value, args []value) (value, *flow) {
+		if v.inNew {
+			return valUndefined, v.throwTypeError("BigInt is not a constructor")
+		}
+		if len(args) == 0 {
+			return valUndefined, v.throwTypeError("cannot convert undefined to a BigInt")
+		}
+		arg := toPrimitive(args[0])
+		switch arg.kind {
+		case kindBigInt:
+			return arg, nil
+		case kindBool:
+			if arg.b {
+				return v.makeBigInt(big.NewInt(1))
+			}
+			return v.makeBigInt(big.NewInt(0))
+		case kindNumber:
+			if math.IsNaN(arg.n) || math.IsInf(arg.n, 0) || math.Trunc(arg.n) != arg.n {
+				return valUndefined, v.throwError("RangeError", "number cannot be converted to a BigInt because it is not an integer")
+			}
+			r := new(big.Rat).SetFloat64(arg.n)
+			if r == nil || !r.IsInt() {
+				return valUndefined, v.throwError("RangeError", "number cannot be converted to a BigInt because it is not an integer")
+			}
+			return v.makeBigInt(new(big.Int).Set(r.Num()))
+		case kindString:
+			z, ok := parseBigIntString(arg.s)
+			if !ok {
+				return valUndefined, v.throwError("SyntaxError", "cannot convert string to a BigInt")
+			}
+			return v.makeBigInt(z)
+		default:
+			return valUndefined, v.throwTypeError("cannot convert value to a BigInt")
+		}
+	}))
+
 	// String & Boolean
-	vm.defGlobal("String", makeNative("String", func(_ *VM, _ value, args []value) (value, *flow) {
+	vm.defGlobal("String", makeNative("String", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 {
 			return strVal(""), nil
 		}
-		return strVal(toString(args[0])), nil
+		if args[0].kind == kindArray {
+			joined, ok := joinArrayBounded(args[0].arr, ",", nil, maxStringBytes)
+			if !ok {
+				return valUndefined, v.throwError("RangeError", "maximum string length exceeded")
+			}
+			return v.makeString(joined)
+		}
+		return v.makeString(toString(args[0]))
 	}))
 	vm.defGlobal("Boolean", makeNative("Boolean", func(_ *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 {
@@ -1672,15 +2336,21 @@ func (vm *VM) installBuiltins() {
 	mathObj.set("trunc", makeNative("trunc", unaryMath(math.Trunc)))
 	mathObj.set("sqrt", makeNative("sqrt", unaryMath(math.Sqrt)))
 	mathObj.set("round", makeNative("round", unaryMath(jsRound)))
-	mathObj.set("pow", makeNative("pow", func(_ *VM, _ value, args []value) (value, *flow) {
+	mathObj.set("pow", makeNative("pow", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) < 2 {
 			return valNaN, nil
 		}
+		if args[0].kind == kindBigInt || args[1].kind == kindBigInt {
+			return valUndefined, v.throwTypeError("cannot convert BigInt value to a number")
+		}
 		return numVal(math.Pow(toNumber(args[0]), toNumber(args[1]))), nil
 	}))
-	mathObj.set("min", makeNative("min", func(_ *VM, _ value, args []value) (value, *flow) {
+	mathObj.set("min", makeNative("min", func(v *VM, _ value, args []value) (value, *flow) {
 		res := math.Inf(1)
 		for _, a := range args {
+			if a.kind == kindBigInt {
+				return valUndefined, v.throwTypeError("cannot convert BigInt value to a number")
+			}
 			n := toNumber(a)
 			if math.IsNaN(n) {
 				return valNaN, nil
@@ -1691,9 +2361,12 @@ func (vm *VM) installBuiltins() {
 		}
 		return numVal(res), nil
 	}))
-	mathObj.set("max", makeNative("max", func(_ *VM, _ value, args []value) (value, *flow) {
+	mathObj.set("max", makeNative("max", func(v *VM, _ value, args []value) (value, *flow) {
 		res := math.Inf(-1)
 		for _, a := range args {
+			if a.kind == kindBigInt {
+				return valUndefined, v.throwTypeError("cannot convert BigInt value to a number")
+			}
 			n := toNumber(a)
 			if math.IsNaN(n) {
 				return valNaN, nil
@@ -1710,31 +2383,157 @@ func (vm *VM) installBuiltins() {
 	arrCtor := makeNative("Array", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 1 && args[0].kind == kindNumber {
 			n := int(args[0].n)
-			if float64(n) != args[0].n || n < 0 || n > 1<<20 {
+			if float64(n) != args[0].n || n < 0 || n > maxArrayLen {
 				return valUndefined, v.throwError("RangeError", "invalid array length")
 			}
 			elems := make([]value, n)
 			for i := range elems {
 				elems[i] = valUndefined
 			}
-			return arrVal(&jsArray{elems: elems}), nil
+			return v.makeArray(elems)
 		}
 		elems := make([]value, len(args))
 		copy(elems, args)
-		return arrVal(&jsArray{elems: elems}), nil
+		return v.makeArray(elems)
 	})
 	arrCtor.fn.props.set("isArray", makeNative("isArray", func(_ *VM, _ value, args []value) (value, *flow) {
 		return boolVal(len(args) > 0 && args[0].kind == kindArray), nil
 	}))
+	arrCtor.fn.props.set("from", makeNative("from", func(v *VM, _ value, args []value) (value, *flow) {
+		if len(args) == 0 || args[0].kind == kindUndefined || args[0].kind == kindNull {
+			return valUndefined, v.throwTypeError("Array.from requires an array-like or iterable object")
+		}
+		var mapFn *jsFunc
+		thisArg := valUndefined
+		if len(args) >= 2 && args[1].kind != kindUndefined {
+			if args[1].kind != kindFunction {
+				return valUndefined, v.throwTypeError("Array.from: when provided, the second argument must be a function")
+			}
+			mapFn = args[1].fn
+			if len(args) >= 3 {
+				thisArg = args[2]
+			}
+		}
+		var raw []value
+		src := args[0]
+		switch src.kind {
+		case kindString:
+			if utf8.RuneCountInString(src.s) > maxArrayLen {
+				return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+			}
+			for _, r := range src.s {
+				raw = append(raw, strVal(string(r)))
+			}
+		case kindArray:
+			if len(src.arr.elems) > maxArrayLen {
+				return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+			}
+			raw = append(raw, src.arr.elems...)
+		case kindMap:
+			if src.mp.size > maxArrayLen {
+				return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+			}
+			for _, entry := range src.mp.entries {
+				if entry.active {
+					pair, pf := v.makeArray([]value{entry.key, entry.val})
+					if pf != nil {
+						return valUndefined, pf
+					}
+					raw = append(raw, pair)
+				}
+			}
+		case kindObject:
+			if lv, ok := src.obj.get("length"); ok {
+				ln := int(toNumber(lv))
+				if ln < 0 {
+					ln = 0
+				}
+				if ln > maxArrayLen {
+					return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+				}
+				for i := 0; i < ln; i++ {
+					el, exists := src.obj.get(strconv.Itoa(i))
+					if !exists {
+						el = valUndefined
+					}
+					raw = append(raw, el)
+				}
+			}
+		}
+		if mapFn != nil {
+			mapped := make([]value, len(raw))
+			for i, el := range raw {
+				mv, f := v.callFunction(mapFn, thisArg, []value{el, numVal(float64(i))})
+				if f != nil {
+					return valUndefined, f
+				}
+				mapped[i] = mv
+			}
+			raw = mapped
+		}
+		return v.makeArray(raw)
+	}))
 	vm.defGlobal("Array", arrCtor)
 
-	// Object
-	objCtor := makeNative("Object", func(_ *VM, _ value, args []value) (value, *flow) {
+	// Map
+	mapCtor := makeNative("Map", func(v *VM, _ value, args []value) (value, *flow) {
+		if !v.inNew {
+			return valUndefined, v.throwTypeError("Constructor Map requires 'new'")
+		}
+		if f := v.chargeAlloc(1); f != nil {
+			return valUndefined, f
+		}
+		m := &jsMap{}
+		if len(args) > 0 && args[0].kind != kindUndefined && args[0].kind != kindNull {
+			switch args[0].kind {
+			case kindArray:
+				for _, item := range args[0].arr.elems {
+					if item.kind != kindArray {
+						return valUndefined, v.throwTypeError("Iterator value is not an entry object")
+					}
+					var k, val = valUndefined, valUndefined
+					if len(item.arr.elems) > 0 {
+						k = item.arr.elems[0]
+					}
+					if len(item.arr.elems) > 1 {
+						val = item.arr.elems[1]
+					}
+					if sf := m.set(v, k, val); sf != nil {
+						return valUndefined, sf
+					}
+				}
+			case kindMap:
+				for _, entry := range args[0].mp.entries {
+					if entry.active {
+						if sf := m.set(v, entry.key, entry.val); sf != nil {
+							return valUndefined, sf
+						}
+					}
+				}
+			default:
+				return valUndefined, v.throwTypeError("iterable is not iterable")
+			}
+		}
+		return mapVal(m), nil
+	})
+	vm.defGlobal("Map", mapCtor)
+
+	// Object & Object.prototype
+	objCtor := makeNative("Object", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 || args[0].kind == kindUndefined || args[0].kind == kindNull {
-			return objVal(newObject()), nil
+			o, f := v.newCheckedObject()
+			if f != nil {
+				return valUndefined, f
+			}
+			return objVal(o), nil
 		}
 		return args[0], nil
 	})
+	objProto := newObject()
+	objProto.set("hasOwnProperty", makeNative("hasOwnProperty", hasOwnPropNative))
+	objProto.set("toString", makeNative("toString", objToStringNative))
+	objCtor.fn.props.set("prototype", objVal(objProto))
+
 	objCtor.fn.props.set("keys", makeNative("keys", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 || args[0].kind == kindUndefined || args[0].kind == kindNull {
 			return valUndefined, v.throwTypeError("cannot convert undefined or null to object")
@@ -1749,7 +2548,7 @@ func (vm *VM) installBuiltins() {
 				elems = append(elems, strVal(strconv.Itoa(i)))
 			}
 		}
-		return arrVal(&jsArray{elems: elems}), nil
+		return v.makeArray(elems)
 	}))
 	objCtor.fn.props.set("values", makeNative("values", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 || args[0].kind == kindUndefined || args[0].kind == kindNull {
@@ -1763,7 +2562,7 @@ func (vm *VM) installBuiltins() {
 		} else if args[0].kind == kindArray {
 			elems = append(elems, args[0].arr.elems...)
 		}
-		return arrVal(&jsArray{elems: elems}), nil
+		return v.makeArray(elems)
 	}))
 	objCtor.fn.props.set("entries", makeNative("entries", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 || args[0].kind == kindUndefined || args[0].kind == kindNull {
@@ -1772,10 +2571,22 @@ func (vm *VM) installBuiltins() {
 		var elems []value
 		if args[0].kind == kindObject {
 			for _, k := range args[0].obj.order {
-				elems = append(elems, arrVal(&jsArray{elems: []value{strVal(k), args[0].obj.props[k]}}))
+				pair, pf := v.makeArray([]value{strVal(k), args[0].obj.props[k]})
+				if pf != nil {
+					return valUndefined, pf
+				}
+				elems = append(elems, pair)
+			}
+		} else if args[0].kind == kindArray {
+			for i, el := range args[0].arr.elems {
+				pair, pf := v.makeArray([]value{strVal(strconv.Itoa(i)), el})
+				if pf != nil {
+					return valUndefined, pf
+				}
+				elems = append(elems, pair)
 			}
 		}
-		return arrVal(&jsArray{elems: elems}), nil
+		return v.makeArray(elems)
 	}))
 	objCtor.fn.props.set("assign", makeNative("assign", func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 || args[0].kind != kindObject {
@@ -1785,7 +2596,9 @@ func (vm *VM) installBuiltins() {
 		for _, src := range args[1:] {
 			if src.kind == kindObject {
 				for _, k := range src.obj.order {
-					dst.set(k, src.obj.props[k])
+					if sf := v.setObjProp(dst, k, src.obj.props[k]); sf != nil {
+						return valUndefined, sf
+					}
 				}
 			}
 		}
@@ -1805,8 +2618,11 @@ func (vm *VM) installBuiltins() {
 		if len(args) == 0 {
 			return valUndefined, v.throwError("SyntaxError", "unexpected end of JSON input")
 		}
-		parsed, err := parseJSONValue([]byte(toString(args[0])))
+		parsed, err := v.parseJSONValueChecked([]byte(toString(args[0])))
 		if err != nil {
+			if errors.Is(err, errJSONLimit) {
+				return valUndefined, v.throwError("RangeError", err.Error())
+			}
 			return valUndefined, v.throwError("SyntaxError", "invalid JSON")
 		}
 		return parsed, nil
@@ -1822,21 +2638,28 @@ func (vm *VM) installBuiltins() {
 		if !ok {
 			return valUndefined, nil
 		}
-		return strVal(out), nil
+		return v.makeString(out)
 	}))
 	vm.defGlobal("JSON", objVal(jsonObj))
 
 	// Error constructors
 	for _, errName := range []string{"Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError"} {
 		en := errName
-		vm.defGlobal(en, makeNative(en, func(_ *VM, _ value, args []value) (value, *flow) {
+		vm.defGlobal(en, makeNative(en, func(v *VM, _ value, args []value) (value, *flow) {
 			msg := ""
 			if len(args) > 0 && args[0].kind != kindUndefined {
 				msg = toString(args[0])
 			}
-			o := newObject()
+			ms, mf := v.makeString(msg)
+			if mf != nil {
+				return valUndefined, mf
+			}
+			o, of := v.newCheckedObject()
+			if of != nil {
+				return valUndefined, of
+			}
 			o.set("name", strVal(en))
-			o.set("message", strVal(msg))
+			o.set("message", ms)
 			return objVal(o), nil
 		}))
 	}
@@ -1853,6 +2676,8 @@ func (vm *VM) installBuiltins() {
 				} else {
 					t = parsed
 				}
+			} else if args[0].kind == kindBigInt {
+				return valUndefined, v.throwTypeError("cannot convert BigInt value to a number")
 			} else {
 				ms := toNumber(args[0])
 				if math.IsNaN(ms) || math.IsInf(ms, 0) {
@@ -1870,11 +2695,14 @@ func (vm *VM) installBuiltins() {
 			}
 			t = time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC)
 		}
-		if thisVal.kind != kindObject {
+		if !v.inNew || thisVal.kind != kindObject {
 			if !valid {
 				return strVal("Invalid Date"), nil
 			}
 			return strVal(t.Format(time.RFC3339)), nil
+		}
+		if f := v.chargeAlloc(1); f != nil {
+			return valUndefined, f
 		}
 		return makeDateObject(t, valid), nil
 	})
@@ -1944,9 +2772,12 @@ func makeDateObject(t time.Time, valid bool) value {
 }
 
 func unaryMath(fn func(float64) float64) nativeFn {
-	return func(_ *VM, _ value, args []value) (value, *flow) {
+	return func(v *VM, _ value, args []value) (value, *flow) {
 		if len(args) == 0 {
 			return valNaN, nil
+		}
+		if args[0].kind == kindBigInt {
+			return valUndefined, v.throwTypeError("cannot convert BigInt value to a number")
 		}
 		return numVal(fn(toNumber(args[0]))), nil
 	}
@@ -1972,19 +2803,255 @@ func digitVal(b byte) int {
 	}
 }
 
+func hasOwnPropNative(v *VM, thisVal value, args []value) (value, *flow) {
+	if thisVal.kind == kindUndefined || thisVal.kind == kindNull {
+		return valUndefined, v.throwTypeError("cannot convert undefined or null to object")
+	}
+	if len(args) == 0 {
+		return valFalse, nil
+	}
+	prop := toString(args[0])
+	switch thisVal.kind {
+	case kindObject:
+		_, ok := thisVal.obj.get(prop)
+		return boolVal(ok), nil
+	case kindArray:
+		if prop == "length" {
+			return valTrue, nil
+		}
+		idx, ok := parseArrayIndex(prop)
+		return boolVal(ok && idx < len(thisVal.arr.elems)), nil
+	case kindString:
+		if prop == "length" {
+			return valTrue, nil
+		}
+		idx, ok := parseArrayIndex(prop)
+		return boolVal(ok && idx < utf8.RuneCountInString(thisVal.s)), nil
+	case kindFunction:
+		if thisVal.fn.props != nil {
+			_, ok := thisVal.fn.props.get(prop)
+			return boolVal(ok), nil
+		}
+	}
+	return valFalse, nil
+}
+
+func objToStringNative(_ *VM, thisVal value, _ []value) (value, *flow) {
+	switch thisVal.kind {
+	case kindUndefined:
+		return strVal("[object Undefined]"), nil
+	case kindNull:
+		return strVal("[object Null]"), nil
+	case kindArray:
+		return strVal("[object Array]"), nil
+	case kindFunction:
+		return strVal("[object Function]"), nil
+	case kindBool:
+		return strVal("[object Boolean]"), nil
+	case kindNumber:
+		return strVal("[object Number]"), nil
+	case kindBigInt:
+		return strVal("[object BigInt]"), nil
+	case kindString:
+		return strVal("[object String]"), nil
+	case kindRegex:
+		return strVal("[object RegExp]"), nil
+	case kindMap:
+		return strVal("[object Map]"), nil
+	default:
+		return strVal("[object Object]"), nil
+	}
+}
+
 func (vm *VM) objectProtoMethod(prop string) value {
 	switch prop {
 	case "hasOwnProperty":
-		return makeNative("hasOwnProperty", func(_ *VM, thisVal value, args []value) (value, *flow) {
-			if thisVal.kind != kindObject || len(args) == 0 {
-				return valFalse, nil
-			}
-			_, ok := thisVal.obj.get(toString(args[0]))
-			return boolVal(ok), nil
-		})
+		return makeNative("hasOwnProperty", hasOwnPropNative)
 	case "toString":
-		return makeNative("toString", func(_ *VM, thisVal value, _ []value) (value, *flow) {
-			return strVal(toString(thisVal)), nil
+		return makeNative("toString", objToStringNative)
+	}
+	return valUndefined
+}
+
+func (vm *VM) funcProtoMethod(prop string) value {
+	switch prop {
+	case "call":
+		return makeNative("call", func(v *VM, thisVal value, args []value) (value, *flow) {
+			if thisVal.kind != kindFunction {
+				return valUndefined, v.throwTypeError("Function.prototype.call called on non-function")
+			}
+			callThis := valUndefined
+			var callArgs []value
+			if len(args) > 0 {
+				callThis = args[0]
+				callArgs = args[1:]
+			}
+			prevNew := v.inNew
+			v.inNew = false
+			res, f := v.callFunction(thisVal.fn, callThis, callArgs)
+			v.inNew = prevNew
+			return res, f
+		})
+	case "apply":
+		return makeNative("apply", func(v *VM, thisVal value, args []value) (value, *flow) {
+			if thisVal.kind != kindFunction {
+				return valUndefined, v.throwTypeError("Function.prototype.apply called on non-function")
+			}
+			callThis := valUndefined
+			if len(args) > 0 {
+				callThis = args[0]
+			}
+			var callArgs []value
+			if len(args) > 1 && args[1].kind != kindUndefined && args[1].kind != kindNull {
+				if args[1].kind != kindArray {
+					return valUndefined, v.throwTypeError("CreateListFromArrayLike called on non-object")
+				}
+				callArgs = args[1].arr.elems
+			}
+			prevNew := v.inNew
+			v.inNew = false
+			res, f := v.callFunction(thisVal.fn, callThis, callArgs)
+			v.inNew = prevNew
+			return res, f
+		})
+	}
+	return valUndefined
+}
+
+func (vm *VM) bigIntProtoMethod(prop string) value {
+	switch prop {
+	case "toString":
+		return makeNative("toString", func(v *VM, thisVal value, args []value) (value, *flow) {
+			if thisVal.kind != kindBigInt {
+				return valUndefined, v.throwTypeError("BigInt.prototype.toString requires a BigInt")
+			}
+			radix := 10
+			if len(args) > 0 && args[0].kind != kindUndefined {
+				radix = int(toInt32(args[0]))
+			}
+			if radix < 2 || radix > 36 {
+				return valUndefined, v.throwError("RangeError", "toString() radix argument must be between 2 and 36")
+			}
+			return v.makeString(thisVal.bi.Text(radix))
+		})
+	case "valueOf":
+		return makeNative("valueOf", func(v *VM, thisVal value, _ []value) (value, *flow) {
+			if thisVal.kind != kindBigInt {
+				return valUndefined, v.throwTypeError("BigInt.prototype.valueOf requires a BigInt")
+			}
+			return thisVal, nil
+		})
+	}
+	return valUndefined
+}
+
+func (vm *VM) mapProtoMethod(prop string) value {
+	switch prop {
+	case "set":
+		return makeNative("set", func(v *VM, thisVal value, args []value) (value, *flow) {
+			if thisVal.kind != kindMap {
+				return valUndefined, v.throwTypeError("Map.prototype.set requires a Map")
+			}
+			var k, val = valUndefined, valUndefined
+			if len(args) > 0 {
+				k = args[0]
+			}
+			if len(args) > 1 {
+				val = args[1]
+			}
+			if f := thisVal.mp.set(v, k, val); f != nil {
+				return valUndefined, f
+			}
+			return thisVal, nil
+		})
+	case "get":
+		return makeNative("get", func(v *VM, thisVal value, args []value) (value, *flow) {
+			if thisVal.kind != kindMap {
+				return valUndefined, v.throwTypeError("Map.prototype.get requires a Map")
+			}
+			k := valUndefined
+			if len(args) > 0 {
+				k = args[0]
+			}
+			val, _ := thisVal.mp.get(k)
+			return val, nil
+		})
+	case "has":
+		return makeNative("has", func(v *VM, thisVal value, args []value) (value, *flow) {
+			if thisVal.kind != kindMap {
+				return valUndefined, v.throwTypeError("Map.prototype.has requires a Map")
+			}
+			k := valUndefined
+			if len(args) > 0 {
+				k = args[0]
+			}
+			return boolVal(thisVal.mp.findIndex(k) >= 0), nil
+		})
+	case "delete":
+		return makeNative("delete", func(v *VM, thisVal value, args []value) (value, *flow) {
+			if thisVal.kind != kindMap {
+				return valUndefined, v.throwTypeError("Map.prototype.delete requires a Map")
+			}
+			k := valUndefined
+			if len(args) > 0 {
+				k = args[0]
+			}
+			return boolVal(thisVal.mp.del(k)), nil
+		})
+	case "clear":
+		return makeNative("clear", func(v *VM, thisVal value, _ []value) (value, *flow) {
+			if thisVal.kind != kindMap {
+				return valUndefined, v.throwTypeError("Map.prototype.clear requires a Map")
+			}
+			thisVal.mp.clear()
+			return valUndefined, nil
+		})
+	case "keys", "values", "entries":
+		mode := prop
+		return makeNative(mode, func(v *VM, thisVal value, _ []value) (value, *flow) {
+			if thisVal.kind != kindMap {
+				return valUndefined, v.throwTypeError("Map.prototype." + mode + " requires a Map")
+			}
+			var out []value
+			for _, entry := range thisVal.mp.entries {
+				if !entry.active {
+					continue
+				}
+				switch mode {
+				case "keys":
+					out = append(out, entry.key)
+				case "values":
+					out = append(out, entry.val)
+				case "entries":
+					pair, pf := v.makeArray([]value{entry.key, entry.val})
+					if pf != nil {
+						return valUndefined, pf
+					}
+					out = append(out, pair)
+				}
+			}
+			return v.makeArray(out)
+		})
+	case "forEach":
+		return makeNative("forEach", func(v *VM, thisVal value, args []value) (value, *flow) {
+			if thisVal.kind != kindMap || len(args) == 0 || args[0].kind != kindFunction {
+				return valUndefined, v.throwTypeError("callback must be a function")
+			}
+			cb := args[0].fn
+			thisArg := valUndefined
+			if len(args) > 1 {
+				thisArg = args[1]
+			}
+			for i := 0; i < len(thisVal.mp.entries); i++ {
+				entry := thisVal.mp.entries[i]
+				if !entry.active {
+					continue
+				}
+				if _, f := v.callFunction(cb, thisArg, []value{entry.val, entry.key, thisVal}); f != nil {
+					return valUndefined, f
+				}
+			}
+			return valUndefined, nil
 		})
 	}
 	return valUndefined
@@ -2018,16 +3085,16 @@ func (vm *VM) numberProtoMethod(prop string) value {
 func (vm *VM) stringProtoMethod(prop string) value {
 	switch prop {
 	case "trim":
-		return makeNative("trim", func(_ *VM, thisVal value, _ []value) (value, *flow) {
-			return strVal(strings.TrimSpace(toString(thisVal))), nil
+		return makeNative("trim", func(v *VM, thisVal value, _ []value) (value, *flow) {
+			return v.makeString(strings.TrimSpace(toString(thisVal)))
 		})
 	case "toLowerCase":
-		return makeNative("toLowerCase", func(_ *VM, thisVal value, _ []value) (value, *flow) {
-			return strVal(strings.ToLower(toString(thisVal))), nil
+		return makeNative("toLowerCase", func(v *VM, thisVal value, _ []value) (value, *flow) {
+			return v.makeString(strings.ToLower(toString(thisVal)))
 		})
 	case "toUpperCase":
-		return makeNative("toUpperCase", func(_ *VM, thisVal value, _ []value) (value, *flow) {
-			return strVal(strings.ToUpper(toString(thisVal))), nil
+		return makeNative("toUpperCase", func(v *VM, thisVal value, _ []value) (value, *flow) {
+			return v.makeString(strings.ToUpper(toString(thisVal)))
 		})
 	case "indexOf":
 		return makeNative("indexOf", func(_ *VM, thisVal value, args []value) (value, *flow) {
@@ -2065,7 +3132,7 @@ func (vm *VM) stringProtoMethod(prop string) value {
 		})
 	case "slice", "substring":
 		isSub := prop == "substring"
-		return makeNative(prop, func(_ *VM, thisVal value, args []value) (value, *flow) {
+		return makeNative(prop, func(v *VM, thisVal value, args []value) (value, *flow) {
 			runes := []rune(toString(thisVal))
 			l := len(runes)
 			start := 0
@@ -2107,7 +3174,7 @@ func (vm *VM) stringProtoMethod(prop string) value {
 					end = start
 				}
 			}
-			return strVal(string(runes[start:end])), nil
+			return v.makeString(string(runes[start:end]))
 		})
 	case "charAt":
 		return makeNative("charAt", func(_ *VM, thisVal value, args []value) (value, *flow) {
@@ -2134,53 +3201,101 @@ func (vm *VM) stringProtoMethod(prop string) value {
 			return numVal(float64(runes[idx])), nil
 		})
 	case "split":
-		return makeNative("split", func(_ *VM, thisVal value, args []value) (value, *flow) {
+		return makeNative("split", func(v *VM, thisVal value, args []value) (value, *flow) {
 			s := toString(thisVal)
 			if len(args) == 0 || args[0].kind == kindUndefined {
-				return arrVal(&jsArray{elems: []value{strVal(s)}}), nil
+				return v.makeArray([]value{strVal(s)})
 			}
 			var parts []string
 			if args[0].kind == kindRegex {
-				parts = args[0].rx.re.Split(s, -1)
+				parts = args[0].rx.re.Split(s, maxArrayLen+2)
 			} else {
-				parts = strings.Split(s, toString(args[0]))
+				sep := toString(args[0])
+				if sep == "" {
+					if utf8.RuneCountInString(s) > maxArrayLen {
+						return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+					}
+					parts = strings.Split(s, "")
+				} else {
+					parts = strings.SplitN(s, sep, maxArrayLen+2)
+				}
+			}
+			if len(parts) > maxArrayLen {
+				return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
 			}
 			elems := make([]value, len(parts))
 			for i, p := range parts {
 				elems[i] = strVal(p)
 			}
-			return arrVal(&jsArray{elems: elems}), nil
+			return v.makeArray(elems)
 		})
 	case "replace":
-		return makeNative("replace", func(_ *VM, thisVal value, args []value) (value, *flow) {
+		return makeNative("replace", func(v *VM, thisVal value, args []value) (value, *flow) {
 			s := toString(thisVal)
 			if len(args) < 2 {
-				return strVal(s), nil
+				return v.makeString(s)
 			}
 			repl := toString(args[1])
 			if args[0].kind == kindRegex {
+				re := args[0].rx.re
 				if strings.Contains(args[0].rx.flags, "g") {
-					return strVal(args[0].rx.re.ReplaceAllString(s, repl)), nil
+					matches := re.FindAllStringSubmatchIndex(s, -1)
+					if len(matches) == 0 {
+						return v.makeString(s)
+					}
+					var out []byte
+					last := 0
+					for _, m := range matches {
+						out = append(out, s[last:m[0]]...)
+						out = re.ExpandString(out, repl, s, m)
+						if len(out) > maxStringBytes {
+							return valUndefined, v.throwError("RangeError", "maximum string length exceeded")
+						}
+						last = m[1]
+					}
+					out = append(out, s[last:]...)
+					if len(out) > maxStringBytes {
+						return valUndefined, v.throwError("RangeError", "maximum string length exceeded")
+					}
+					return v.makeString(string(out))
 				}
-				loc := args[0].rx.re.FindStringIndex(s)
-				if loc == nil {
-					return strVal(s), nil
+				m := re.FindStringSubmatchIndex(s)
+				if m == nil {
+					return v.makeString(s)
 				}
-				return strVal(s[:loc[0]] + args[0].rx.re.ReplaceAllString(s[loc[0]:loc[1]], repl) + s[loc[1]:]), nil
+				var out []byte
+				out = append(out, s[:m[0]]...)
+				out = re.ExpandString(out, repl, s, m)
+				out = append(out, s[m[1]:]...)
+				if len(out) > maxStringBytes {
+					return valUndefined, v.throwError("RangeError", "maximum string length exceeded")
+				}
+				return v.makeString(string(out))
 			}
-			return strVal(strings.Replace(s, toString(args[0]), repl, 1)), nil
+			needle := toString(args[0])
+			idx := strings.Index(s, needle)
+			if idx < 0 {
+				return v.makeString(s)
+			}
+			if len(s)-len(needle)+len(repl) > maxStringBytes {
+				return valUndefined, v.throwError("RangeError", "maximum string length exceeded")
+			}
+			return v.makeString(s[:idx] + repl + s[idx+len(needle):])
 		})
 	case "padStart", "padEnd":
 		isStart := prop == "padStart"
-		return makeNative(prop, func(_ *VM, thisVal value, args []value) (value, *flow) {
+		return makeNative(prop, func(v *VM, thisVal value, args []value) (value, *flow) {
 			s := toString(thisVal)
 			if len(args) == 0 {
-				return strVal(s), nil
+				return v.makeString(s)
 			}
 			targetLen := int(toInt32(args[0]))
 			runes := []rune(s)
 			if len(runes) >= targetLen {
-				return strVal(s), nil
+				return v.makeString(s)
+			}
+			if targetLen > maxStringBytes {
+				return valUndefined, v.throwError("RangeError", "maximum string length exceeded")
 			}
 			pad := " "
 			if len(args) > 1 && args[1].kind != kindUndefined {
@@ -2188,29 +3303,36 @@ func (vm *VM) stringProtoMethod(prop string) value {
 			}
 			padRunes := []rune(pad)
 			if len(padRunes) == 0 {
-				return strVal(s), nil
+				return v.makeString(s)
 			}
 			need := targetLen - len(runes)
-			var buf []rune
+			buf := make([]rune, 0, need)
 			for len(buf) < need {
 				buf = append(buf, padRunes...)
 			}
 			buf = buf[:need]
 			if isStart {
-				return strVal(string(append(buf, runes...))), nil
+				return v.makeString(string(append(buf, runes...)))
 			}
-			return strVal(string(append(runes, buf...))), nil
+			return v.makeString(string(append(runes, buf...)))
 		})
 	case "repeat":
 		return makeNative("repeat", func(v *VM, thisVal value, args []value) (value, *flow) {
 			if len(args) == 0 {
 				return strVal(""), nil
 			}
+			s := toString(thisVal)
 			n := int(toInt32(args[0]))
-			if n < 0 || n > 1<<16 {
+			if n < 0 {
 				return valUndefined, v.throwError("RangeError", "invalid repeat count")
 			}
-			return strVal(strings.Repeat(toString(thisVal), n)), nil
+			if n == 0 || s == "" {
+				return strVal(""), nil
+			}
+			if n > maxStringBytes/len(s) {
+				return valUndefined, v.throwError("RangeError", "maximum string length exceeded")
+			}
+			return v.makeString(strings.Repeat(s, n))
 		})
 	}
 	return valUndefined
@@ -2219,9 +3341,18 @@ func (vm *VM) stringProtoMethod(prop string) value {
 func (vm *VM) arrayProtoMethod(prop string) value {
 	switch prop {
 	case "push":
-		return makeNative("push", func(_ *VM, thisVal value, args []value) (value, *flow) {
+		return makeNative("push", func(v *VM, thisVal value, args []value) (value, *flow) {
 			if thisVal.kind != kindArray {
 				return valUndefined, nil
+			}
+			oldLen := len(thisVal.arr.elems)
+			if oldLen+len(args) > maxArrayLen {
+				return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+			}
+			if (oldLen / 64) != ((oldLen + len(args)) / 64) {
+				if f := v.chargeAlloc(1 + len(args)/64); f != nil {
+					return valUndefined, f
+				}
 			}
 			thisVal.arr.elems = append(thisVal.arr.elems, args...)
 			return numVal(float64(len(thisVal.arr.elems))), nil
@@ -2245,9 +3376,9 @@ func (vm *VM) arrayProtoMethod(prop string) value {
 			return first, nil
 		})
 	case "slice":
-		return makeNative("slice", func(_ *VM, thisVal value, args []value) (value, *flow) {
+		return makeNative("slice", func(v *VM, thisVal value, args []value) (value, *flow) {
 			if thisVal.kind != kindArray {
-				return arrVal(&jsArray{}), nil
+				return v.makeArray(nil)
 			}
 			elems := thisVal.arr.elems
 			l := len(elems)
@@ -2273,11 +3404,25 @@ func (vm *VM) arrayProtoMethod(prop string) value {
 			}
 			cp := make([]value, end-start)
 			copy(cp, elems[start:end])
-			return arrVal(&jsArray{elems: cp}), nil
+			return v.makeArray(cp)
 		})
 	case "concat":
-		return makeNative("concat", func(_ *VM, thisVal value, args []value) (value, *flow) {
-			var out []value
+		return makeNative("concat", func(v *VM, thisVal value, args []value) (value, *flow) {
+			total := 0
+			if thisVal.kind == kindArray {
+				total += len(thisVal.arr.elems)
+			}
+			for _, a := range args {
+				if a.kind == kindArray {
+					total += len(a.arr.elems)
+				} else {
+					total++
+				}
+				if total > maxArrayLen {
+					return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+				}
+			}
+			out := make([]value, 0, total)
 			if thisVal.kind == kindArray {
 				out = append(out, thisVal.arr.elems...)
 			}
@@ -2288,10 +3433,10 @@ func (vm *VM) arrayProtoMethod(prop string) value {
 					out = append(out, a)
 				}
 			}
-			return arrVal(&jsArray{elems: out}), nil
+			return v.makeArray(out)
 		})
 	case "join":
-		return makeNative("join", func(_ *VM, thisVal value, args []value) (value, *flow) {
+		return makeNative("join", func(v *VM, thisVal value, args []value) (value, *flow) {
 			if thisVal.kind != kindArray {
 				return strVal(""), nil
 			}
@@ -2299,15 +3444,11 @@ func (vm *VM) arrayProtoMethod(prop string) value {
 			if len(args) > 0 && args[0].kind != kindUndefined {
 				sep = toString(args[0])
 			}
-			parts := make([]string, len(thisVal.arr.elems))
-			for i, el := range thisVal.arr.elems {
-				if el.kind == kindUndefined || el.kind == kindNull {
-					parts[i] = ""
-				} else {
-					parts[i] = toString(el)
-				}
+			joined, ok := joinArrayBounded(thisVal.arr, sep, nil, maxStringBytes)
+			if !ok {
+				return valUndefined, v.throwError("RangeError", "maximum string length exceeded")
 			}
-			return strVal(strings.Join(parts, sep)), nil
+			return v.makeString(joined)
 		})
 	case "indexOf":
 		return makeNative("indexOf", func(_ *VM, thisVal value, args []value) (value, *flow) {
@@ -2327,7 +3468,7 @@ func (vm *VM) arrayProtoMethod(prop string) value {
 				return valFalse, nil
 			}
 			for _, el := range thisVal.arr.elems {
-				if strictEqual(el, args[0]) || (el.kind == kindNumber && args[0].kind == kindNumber && math.IsNaN(el.n) && math.IsNaN(args[0].n)) {
+				if sameValueZero(el, args[0]) {
 					return valTrue, nil
 				}
 			}
@@ -2340,18 +3481,28 @@ func (vm *VM) arrayProtoMethod(prop string) value {
 				return valUndefined, v.throwTypeError("callback must be a function")
 			}
 			cb := args[0].fn
+			thisArg := valUndefined
+			if len(args) > 1 {
+				thisArg = args[1]
+			}
 			var out []value
 			for i := 0; i < len(thisVal.arr.elems); i++ {
 				el := thisVal.arr.elems[i]
-				res, f := v.callFunction(cb, valUndefined, []value{el, numVal(float64(i)), thisVal})
+				res, f := v.callFunction(cb, thisArg, []value{el, numVal(float64(i)), thisVal})
 				if f != nil {
 					return valUndefined, f
 				}
 				switch mode {
 				case "map":
+					if len(out) >= maxArrayLen {
+						return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+					}
 					out = append(out, res)
 				case "filter":
 					if toBool(res) {
+						if len(out) >= maxArrayLen {
+							return valUndefined, v.throwError("RangeError", "maximum array length exceeded")
+						}
 						out = append(out, el)
 					}
 				case "every":
@@ -2370,7 +3521,7 @@ func (vm *VM) arrayProtoMethod(prop string) value {
 			}
 			switch mode {
 			case "map", "filter":
-				return arrVal(&jsArray{elems: out}), nil
+				return v.makeArray(out)
 			case "every":
 				return valTrue, nil
 			case "some":
@@ -2441,6 +3592,12 @@ func (vm *VM) arrayProtoMethod(prop string) value {
 }
 
 func compileJSRegex(vm *VM, pattern, flags string) (*jsRegex, *flow) {
+	if len(pattern) > maxStringBytes {
+		return nil, vm.throwError("RangeError", "regular expression pattern too large")
+	}
+	if f := vm.chargeAlloc(1); f != nil {
+		return nil, f
+	}
 	prefix := ""
 	for i := 0; i < len(flags); i++ {
 		switch flags[i] {
@@ -2481,10 +3638,15 @@ func (vm *VM) regexProtoMethod(prop string) value {
 
 // JSON conversion helpers
 
-func parseJSONValue(data []byte) (value, error) {
+var errJSONLimit = errors.New("JSON value exceeds VM resource bounds")
+
+func (vm *VM) parseJSONValueChecked(data []byte) (value, error) {
+	if len(data) > maxStringBytes*4 {
+		return valUndefined, errJSONLimit
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	v, err := decodeJSONToken(dec)
+	v, err := vm.decodeJSONTokenChecked(dec, 0)
 	if err != nil {
 		return valUndefined, err
 	}
@@ -2494,7 +3656,10 @@ func parseJSONValue(data []byte) (value, error) {
 	return v, nil
 }
 
-func decodeJSONToken(dec *json.Decoder) (value, error) {
+func (vm *VM) decodeJSONTokenChecked(dec *json.Decoder, depth int) (value, error) {
+	if depth > maxJSONDepth {
+		return valUndefined, errJSONLimit
+	}
 	tok, err := dec.Token()
 	if err != nil {
 		return valUndefined, err
@@ -2511,13 +3676,20 @@ func decodeJSONToken(dec *json.Decoder) (value, error) {
 		}
 		return numVal(f), nil
 	case string:
-		return strVal(t), nil
+		v, f := vm.makeString(t)
+		if f != nil {
+			return valUndefined, errJSONLimit
+		}
+		return v, nil
 	case json.Delim:
 		switch t {
 		case '[':
 			var elems []value
 			for dec.More() {
-				el, err := decodeJSONToken(dec)
+				if len(elems) >= maxArrayLen {
+					return valUndefined, errJSONLimit
+				}
+				el, err := vm.decodeJSONTokenChecked(dec, depth+1)
 				if err != nil {
 					return valUndefined, err
 				}
@@ -2526,9 +3698,16 @@ func decodeJSONToken(dec *json.Decoder) (value, error) {
 			if _, err := dec.Token(); err != nil {
 				return valUndefined, err
 			}
-			return arrVal(&jsArray{elems: elems}), nil
+			arr, af := vm.makeArray(elems)
+			if af != nil {
+				return valUndefined, errJSONLimit
+			}
+			return arr, nil
 		case '{':
-			o := newObject()
+			o, of := vm.newCheckedObject()
+			if of != nil {
+				return valUndefined, errJSONLimit
+			}
 			for dec.More() {
 				kt, err := dec.Token()
 				if err != nil {
@@ -2538,11 +3717,16 @@ func decodeJSONToken(dec *json.Decoder) (value, error) {
 				if !ok {
 					return valUndefined, errors.New("expected string key")
 				}
-				val, err := decodeJSONToken(dec)
+				if len(key) > maxStringBytes {
+					return valUndefined, errJSONLimit
+				}
+				val, err := vm.decodeJSONTokenChecked(dec, depth+1)
 				if err != nil {
 					return valUndefined, err
 				}
-				o.set(key, val)
+				if sf := vm.setObjProp(o, key, val); sf != nil {
+					return valUndefined, errJSONLimit
+				}
 			}
 			if _, err := dec.Token(); err != nil {
 				return valUndefined, err
@@ -2560,9 +3744,14 @@ func stringifyValue(vm *VM, v value) (string, bool, *flow) {
 
 	var write func(val value) (bool, *flow)
 	write = func(val value) (bool, *flow) {
+		if buf.Len() > maxStringBytes {
+			return false, vm.throwError("RangeError", "maximum string length exceeded")
+		}
 		switch val.kind {
 		case kindUndefined, kindFunction:
 			return false, nil
+		case kindBigInt:
+			return false, vm.throwTypeError("Do not know how to serialize a BigInt")
 		case kindNull:
 			buf.WriteString("null")
 			return true, nil
@@ -2581,7 +3770,13 @@ func stringifyValue(vm *VM, v value) (string, bool, *flow) {
 			buf.WriteString(formatJSNumber(val.n))
 			return true, nil
 		case kindString:
+			if buf.Len()+len(val.s) > maxStringBytes {
+				return false, vm.throwError("RangeError", "maximum string length exceeded")
+			}
 			enc, _ := json.Marshal(val.s)
+			if buf.Len()+len(enc) > maxStringBytes {
+				return false, vm.throwError("RangeError", "maximum string length exceeded")
+			}
 			buf.Write(enc)
 			return true, nil
 		case kindArray:
@@ -2606,6 +3801,9 @@ func stringifyValue(vm *VM, v value) (string, bool, *flow) {
 				}
 			}
 			buf.WriteByte(']')
+			if buf.Len() > maxStringBytes {
+				return false, vm.throwError("RangeError", "maximum string length exceeded")
+			}
 			return true, nil
 		case kindObject:
 			if seenObj[val.obj] {
@@ -2624,6 +3822,9 @@ func stringifyValue(vm *VM, v value) (string, bool, *flow) {
 					buf.WriteByte(',')
 				}
 				keyBytes, _ := json.Marshal(k)
+				if buf.Len()+len(keyBytes)+1 > maxStringBytes {
+					return false, vm.throwError("RangeError", "maximum string length exceeded")
+				}
 				buf.Write(keyBytes)
 				buf.WriteByte(':')
 				_, f := write(pv)
@@ -2633,6 +3834,9 @@ func stringifyValue(vm *VM, v value) (string, bool, *flow) {
 				written++
 			}
 			buf.WriteByte('}')
+			if buf.Len() > maxStringBytes {
+				return false, vm.throwError("RangeError", "maximum string length exceeded")
+			}
 			return true, nil
 		default:
 			buf.WriteString("{}")
@@ -2644,5 +3848,9 @@ func stringifyValue(vm *VM, v value) (string, bool, *flow) {
 	if f != nil || !ok {
 		return "", false, f
 	}
+	if buf.Len() > maxStringBytes {
+		return "", false, vm.throwError("RangeError", "maximum string length exceeded")
+	}
 	return buf.String(), true, nil
 }
+

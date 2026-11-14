@@ -404,13 +404,36 @@ func hasRawSextantCapture(raw json.RawMessage) bool {
 }
 
 type moldloftWire struct {
-	Files               map[string]json.RawMessage `json:"files,omitempty"`
-	Status              string                     `json:"status,omitempty"`
-	RegulatoryAmbiguity bool                       `json:"regulatory_ambiguity,omitempty"`
+	Files               json.RawMessage `json:"files,omitempty"`
+	Publish             json.RawMessage `json:"publish,omitempty"`
+	Build               json.RawMessage `json:"build,omitempty"`
+	Status              string          `json:"status,omitempty"`
+	RegulatoryAmbiguity bool            `json:"regulatory_ambiguity,omitempty"`
 }
 
 type base64FileWire struct {
 	Base64 string `json:"base64"`
+}
+
+type arrayFileWire struct {
+	Path    string  `json:"path"`
+	Content *string `json:"content,omitempty"`
+	Base64  *string `json:"base64,omitempty"`
+}
+
+func requireJSONObjectIfPresent(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] != '{' {
+		return errors.New("metadata block must be a JSON object")
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil || obj == nil {
+		return errors.New("invalid metadata object")
+	}
+	return nil
 }
 
 func decodeMoldloftBundle(raw json.RawMessage) (map[string][]byte, bool, error) {
@@ -426,6 +449,12 @@ func decodeMoldloftBundle(raw json.RawMessage) (map[string][]byte, bool, error) 
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, false, errors.New("trailing data")
 	}
+	if err := requireJSONObjectIfPresent(payload.Publish); err != nil {
+		return nil, false, err
+	}
+	if err := requireJSONObjectIfPresent(payload.Build); err != nil {
+		return nil, false, err
+	}
 
 	if payload.RegulatoryAmbiguity || payload.Status == "regulatory_ambiguity" {
 		return nil, true, nil
@@ -433,43 +462,92 @@ func decodeMoldloftBundle(raw json.RawMessage) (map[string][]byte, bool, error) 
 	if payload.Status != "" && payload.Status != "ready" && payload.Status != "built" {
 		return nil, false, errors.New("unrecognized moldloft status")
 	}
-	if len(payload.Files) == 0 {
+
+	filesRaw := bytes.TrimSpace(payload.Files)
+	if len(filesRaw) == 0 {
 		return nil, false, errors.New("empty moldloft files")
 	}
 
-	out := make(map[string][]byte, len(payload.Files))
-	for name, entryRaw := range payload.Files {
-		trimmed := bytes.TrimSpace(entryRaw)
-		if len(trimmed) == 0 {
-			return nil, false, errors.New("empty file value")
+	switch filesRaw[0] {
+	case '{':
+		var fileMap map[string]json.RawMessage
+		if err := json.Unmarshal(filesRaw, &fileMap); err != nil || len(fileMap) == 0 {
+			return nil, false, errors.New("empty moldloft files")
 		}
-		switch trimmed[0] {
-		case '"':
-			var text string
-			if err := json.Unmarshal(trimmed, &text); err != nil {
-				return nil, false, err
+		out := make(map[string][]byte, len(fileMap))
+		for name, entryRaw := range fileMap {
+			trimmed := bytes.TrimSpace(entryRaw)
+			if len(trimmed) == 0 {
+				return nil, false, errors.New("empty file value")
 			}
-			out[name] = []byte(text)
-		case '{':
-			var b64 base64FileWire
-			fdec := json.NewDecoder(bytes.NewReader(trimmed))
+			switch trimmed[0] {
+			case '"':
+				var text string
+				if err := json.Unmarshal(trimmed, &text); err != nil {
+					return nil, false, err
+				}
+				out[name] = []byte(text)
+			case '{':
+				var b64 base64FileWire
+				fdec := json.NewDecoder(bytes.NewReader(trimmed))
+				fdec.DisallowUnknownFields()
+				if err := fdec.Decode(&b64); err != nil {
+					return nil, false, err
+				}
+				if _, err := fdec.Token(); err != io.EOF {
+					return nil, false, errors.New("trailing data")
+				}
+				decoded, err := base64.StdEncoding.DecodeString(b64.Base64)
+				if err != nil {
+					return nil, false, err
+				}
+				out[name] = decoded
+			default:
+				return nil, false, errors.New("invalid file encoding")
+			}
+		}
+		return out, false, nil
+
+	case '[':
+		var list []json.RawMessage
+		if err := json.Unmarshal(filesRaw, &list); err != nil || len(list) == 0 {
+			return nil, false, errors.New("empty moldloft files")
+		}
+		out := make(map[string][]byte, len(list))
+		for _, elemRaw := range list {
+			var entry arrayFileWire
+			fdec := json.NewDecoder(bytes.NewReader(elemRaw))
 			fdec.DisallowUnknownFields()
-			if err := fdec.Decode(&b64); err != nil {
+			if err := fdec.Decode(&entry); err != nil {
 				return nil, false, err
 			}
 			if _, err := fdec.Token(); err != io.EOF {
 				return nil, false, errors.New("trailing data")
 			}
-			decoded, err := base64.StdEncoding.DecodeString(b64.Base64)
-			if err != nil {
-				return nil, false, err
+			if entry.Path == "" {
+				return nil, false, errors.New("empty file path")
 			}
-			out[name] = decoded
-		default:
-			return nil, false, errors.New("invalid file encoding")
+			if _, dup := out[entry.Path]; dup {
+				return nil, false, errors.New("duplicate file path")
+			}
+			if (entry.Content != nil) == (entry.Base64 != nil) {
+				return nil, false, errors.New("file entry must carry either content or base64")
+			}
+			if entry.Content != nil {
+				out[entry.Path] = []byte(*entry.Content)
+			} else {
+				decoded, err := base64.StdEncoding.DecodeString(*entry.Base64)
+				if err != nil {
+					return nil, false, err
+				}
+				out[entry.Path] = decoded
+			}
 		}
+		return out, false, nil
+
+	default:
+		return nil, false, errors.New("invalid moldloft files container")
 	}
-	return out, false, nil
 }
 
 func safeToken(s string) string {

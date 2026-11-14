@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sample hourly rate build-up</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<main>
+<h1>Sample hourly rate build-up</h1>
+<p class="lede">Builds a made-up hourly rate from a base rate, add-on percentages and a fee, one step at a time. Every rule and number in it is invented to exercise the calculator template.</p>
+
+<section aria-labelledby="h-scope">
+<h2 id="h-scope">What this tool does not cover</h2>
+<ul>
+<li>Every rule, rate and threshold here is fictional. Do not use the result for a real proposal, invoice or contract.</li>
+<li>It covers one labour category at a time and does not add travel, materials or other direct costs.</li>
+<li>It does not check whether a rate is allowable under any real regulation.</li>
+</ul>
+</section>
+
+<section aria-labelledby="h-inputs">
+<h2 id="h-inputs">Your values</h2>
+<form id="inputs" novalidate autocomplete="off">
+<div class="field">
+<label for="in-base_rate">Base hourly rate <span class="unit">(per hour)</span></label>
+<input id="in-base_rate" type="text" inputmode="decimal" value="40.00" aria-describedby="hint-base_rate err-base_rate">
+<p class="hint" id="hint-base_rate">The rate paid for one hour of work, before anything is added. From 0.00 to 500.00, with up to 2 decimal places.</p>
+<p class="error" id="err-base_rate" aria-live="polite"></p>
+</div>
+<div class="field">
+<label for="in-hours">Hours of work <span class="unit">(hours)</span></label>
+<input id="in-hours" type="text" inputmode="decimal" value="100" aria-describedby="hint-hours err-hours">
+<p class="hint" id="hint-hours">From 0 to 10000, with up to 1 decimal place.</p>
+<p class="error" id="err-hours" aria-live="polite"></p>
+</div>
+<div class="field">
+<label for="in-fee_tier">Fee tier <span class="unit">(percent)</span></label>
+<select id="in-fee_tier" aria-describedby="hint-fee_tier err-fee_tier">
+<option value="low">Low risk (5.0)</option>
+<option value="standard" selected>Standard (7.5)</option>
+<option value="high">High risk (10.0)</option>
+</select>
+<p class="hint" id="hint-fee_tier">Choose one. The values are listed under “Fee tiers” below.</p>
+<p class="error" id="err-fee_tier" aria-live="polite"></p>
+</div>
+<button type="reset">Put the starting values back</button>
+</form>
+</section>
+
+<section aria-labelledby="h-totals">
+<h2 id="h-totals">Result</h2>
+<dl class="totals">
+<div>
+<dt>Billable rate <span class="unit">(per hour)</span></dt>
+<dd id="total-billable_rate">-</dd>
+</div>
+<div>
+<dt>Total for the hours</dt>
+<dd id="total-total">-</dd>
+</div>
+</dl>
+<p class="hint" id="status" aria-live="polite">The result needs JavaScript and has not been worked out.</p>
+</section>
+
+<section aria-labelledby="h-steps">
+<h2 id="h-steps">How the result is worked out</h2>
+<div class="scroll">
+<table>
+<thead>
+<tr><th scope="col">Step</th><th scope="col">What it is</th><th scope="col">How it is worked out</th><th scope="col" class="number">Result</th><th scope="col">Source</th></tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Fringe <span class="unit">(per hour)</span></td>
+<td>Base hourly rate × Fringe percentage ÷ 100, rounded to 2 decimal places.</td>
+<td class="number" id="out-fringe">-</td>
+<td><a href="#cite-rule_fringe">[1]</a></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Rate with fringe <span class="unit">(per hour)</span></td>
+<td>Base hourly rate &#43; Fringe, rounded to 2 decimal places.</td>
+<td class="number" id="out-overhead_base">-</td>
+<td><a href="#cite-rule_overhead">[2]</a></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Overhead <span class="unit">(per hour)</span></td>
+<td>Rate with fringe × Overhead percentage ÷ 100, rounded to 2 decimal places.</td>
+<td class="number" id="out-overhead">-</td>
+<td><a href="#cite-rule_overhead">[2]</a></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Cost rate <span class="unit">(per hour)</span></td>
+<td>Base hourly rate &#43; Fringe &#43; Overhead, rounded to 2 decimal places.</td>
+<td class="number" id="out-cost_rate">-</td>
+<td></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Fee before the cap <span class="unit">(per hour)</span></td>
+<td>Cost rate × Fee tier ÷ 100, rounded to 2 decimal places.</td>
+<td class="number" id="out-fee_uncapped">-</td>
+<td><a href="#cite-rule_fee">[3]</a></td>
+</tr>
+<tr>
+<td>6</td>
+<td>Fee <span class="unit">(per hour)</span></td>
+<td>The smallest of: Fee before the cap; Largest fee allowed, rounded to 2 decimal places.</td>
+<td class="number" id="out-fee">-</td>
+<td><a href="#cite-rule_fee">[3]</a></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Loaded rate <span class="unit">(per hour)</span></td>
+<td>Cost rate &#43; Fee, rounded to 2 decimal places.</td>
+<td class="number" id="out-loaded_rate">-</td>
+<td></td>
+</tr>
+<tr>
+<td>8</td>
+<td>Loaded rate above the minimum <span class="unit">(per hour)</span></td>
+<td>Loaded rate − Minimum billable rate, rounded to 2 decimal places.</td>
+<td class="number" id="out-above_floor">-</td>
+<td><a href="#cite-rule_floor">[4]</a></td>
+</tr>
+<tr class="total">
+<td>9</td>
+<td>Billable rate <span class="unit">(per hour)</span></td>
+<td>The largest of: Loaded rate; Minimum billable rate, rounded to 2 decimal places.</td>
+<td class="number" id="out-billable_rate">-</td>
+<td><a href="#cite-rule_floor">[4]</a></td>
+</tr>
+<tr class="total">
+<td>10</td>
+<td>Total for the hours</td>
+<td>Billable rate × Hours of work, rounded to 2 decimal places.</td>
+<td class="number" id="out-total">-</td>
+<td></td>
+</tr>
+<tr>
+<td>11</td>
+<td>Working days <span class="unit">(days)</span></td>
+<td>Hours of work ÷ Hours in a working day, rounded to 1 decimal place.</td>
+<td class="number" id="out-days">-</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p class="hint">Every step uses exact decimal arithmetic. Where a step is rounded, a half is rounded away from zero: 0.125 to 2 decimal places is 0.13.</p>
+</section>
+
+<section aria-labelledby="h-constants">
+<h2 id="h-constants">Fixed values</h2>
+<div class="scroll">
+<table>
+<thead>
+<tr><th scope="col">What it is</th><th scope="col" class="number">Value</th><th scope="col">Source</th></tr>
+</thead>
+<tbody>
+<tr>
+<td>Fringe percentage <span class="unit">(percent)</span></td>
+<td class="number">32.5</td>
+<td><a href="#cite-rule_fringe">[1]</a></td>
+</tr>
+<tr>
+<td>Overhead percentage <span class="unit">(percent)</span></td>
+<td class="number">18.25</td>
+<td><a href="#cite-rule_overhead">[2]</a></td>
+</tr>
+<tr>
+<td>Largest fee allowed <span class="unit">(per hour)</span></td>
+<td class="number">5.00</td>
+<td><a href="#cite-rule_fee">[3]</a></td>
+</tr>
+<tr>
+<td>Minimum billable rate <span class="unit">(per hour)</span></td>
+<td class="number">60.00</td>
+<td><a href="#cite-rule_floor">[4]</a></td>
+</tr>
+<tr>
+<td>Hours in a working day <span class="unit">(hours)</span></td>
+<td class="number">8</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section aria-labelledby="h-table-fee_tiers">
+<h2 id="h-table-fee_tiers">Fee tiers <span class="unit">(percent)</span> <a href="#cite-rule_fee">[3]</a></h2>
+<div class="scroll">
+<table>
+<thead>
+<tr><th scope="col">Option</th><th scope="col" class="number">Value</th></tr>
+</thead>
+<tbody>
+<tr><td>Low risk</td><td class="number">5.0</td></tr>
+<tr><td>Standard</td><td class="number">7.5</td></tr>
+<tr><td>High risk</td><td class="number">10.0</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section aria-labelledby="h-sources">
+<h2 id="h-sources">Sources</h2>
+<ol>
+<li id="cite-rule_fringe">Sample Rule 12.3(a) (fictional). Sets the made-up fringe percentage <span class="unit">https://rules.example/sample-rule-12-3</span></li>
+<li id="cite-rule_overhead">Sample Rule 12.3(b) (fictional). Sets the made-up overhead percentage and what it applies to</li>
+<li id="cite-rule_fee">Sample Rule 12.4 (fictional). Sets the made-up fee tiers and the cap on the fee</li>
+<li id="cite-rule_floor">Sample Rule 12.5 (fictional). Sets the made-up minimum billable rate</li>
+</ol>
+</section>
+
+<footer>
+<p>This page works entirely in your browser. It stores nothing and sends nothing anywhere. <a href="tests/index.html">Run the worked examples</a>.</p>
+<p>Generated by Moldloft v0.1.0-draft from the <code>calculator</code> template. MIT License.</p>
+</footer>
+</main>
+<script src="js/data.js"></script>
+<script src="js/decimal.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
