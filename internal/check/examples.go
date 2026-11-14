@@ -1,30 +1,17 @@
 package check
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
-	"time"
 
-	"github.com/dop251/goja"
+	"github.com/ClearedStack/shakedown/internal/js"
 )
 
 const examplesFormat = "v1"
 
 var exampleKinds = map[string]bool{"worked": true, "boundary": true, "synthetic": true}
-
-// fixedClock is what a tool's script sees as "now". Examples that depend on
-// a date must pass it in as input.
-var fixedClock = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
-
-func init() {
-	// The script engine reads the process time zone for local-time methods.
-	// Pin it so the same input gives the same output on any machine.
-	time.Local = time.UTC
-}
-
-// prelude removes the one source of randomness a script can reach.
-const prelude = `Math.random = function () { throw new TypeError("Math.random is not available"); };`
 
 type exampleCase struct {
 	name   string
@@ -92,9 +79,9 @@ func (c *checker) runExamples(b *bundle, m *manifest) (map[string]bool, bool) {
 		c.add(Examples, "EX-COVERAGE", EParse, p, "the examples need at least one worked case and one boundary case")
 	}
 
-	var progs []*goja.Program
+	var progs []*js.Program
 	for _, s := range m.Scripts {
-		prog, err := goja.Compile(s, string(b.data[s]), false)
+		prog, err := js.Parse(s, string(b.data[s]))
 		if err != nil {
 			c.add(Examples, "EX-SCRIPT", EParse, s, "the logic script could not be loaded")
 			return calcs, true
@@ -108,9 +95,9 @@ func (c *checker) runExamples(b *bundle, m *manifest) (map[string]bool, bool) {
 			break
 		}
 		out, err := c.runCase(progs, m.Function, ec.input)
-		var interrupted *goja.InterruptedError
+		interrupted := errors.Is(err, js.ErrInterrupted)
 		switch {
-		case errors.As(err, &interrupted):
+		case interrupted:
 			c.add(Examples, "EX-TIMEOUT", ETimeout, p, "the case "+ec.name+" did not finish before its deadline")
 		case errors.Is(err, errLoad):
 			c.add(Examples, "EX-SCRIPT", EParse, m.Scripts[0], "the logic scripts failed while loading")
@@ -127,7 +114,7 @@ func (c *checker) runExamples(b *bundle, m *manifest) (map[string]bool, bool) {
 		if i == 0 && err != nil && (errors.Is(err, errLoad) || errors.Is(err, errNoFunction)) {
 			break // the same failure would repeat for every case
 		}
-		if interrupted != nil {
+		if interrupted {
 			break // leave the item retryable instead of spending every deadline
 		}
 	}
@@ -140,43 +127,21 @@ var (
 )
 
 // runCase returns the function's result as JSON text.
-func (c *checker) runCase(progs []*goja.Program, fn string, input json.RawMessage) (string, error) {
-	vm := goja.New()
-	vm.SetTimeSource(func() time.Time { return fixedClock })
-	vm.SetRandSource(func() float64 { return 0 })
-	vm.SetMaxCallStackSize(512)
-	timer := time.AfterFunc(c.opts.CaseTimeout, func() { vm.Interrupt("deadline") })
-	defer timer.Stop()
+func (c *checker) runCase(progs []*js.Program, fn string, input json.RawMessage) (string, error) {
+	caseCtx, cancel := context.WithTimeout(c.ctx, c.opts.CaseTimeout)
+	defer cancel()
 
-	var interrupted *goja.InterruptedError
-	if _, err := vm.RunString(prelude); err != nil {
-		return "", err
-	}
+	vm := js.NewVM()
 	for _, prog := range progs {
-		if _, err := vm.RunProgram(prog); err != nil {
-			if errors.As(err, &interrupted) {
+		if err := vm.RunProgram(caseCtx, prog); err != nil {
+			if errors.Is(err, js.ErrInterrupted) {
 				return "", err
 			}
 			return "", errLoad
 		}
 	}
-	kind, err := vm.RunString("typeof " + fn)
-	if err != nil {
-		return "", err
-	}
-	if kind.String() != "function" {
+	if !vm.HasFunction(fn) {
 		return "", errNoFunction
 	}
-	literal, err := json.Marshal(string(input))
-	if err != nil {
-		return "", err
-	}
-	v, err := vm.RunString("JSON.stringify(" + fn + "(JSON.parse(" + string(literal) + ")))")
-	if err != nil {
-		return "", err
-	}
-	if goja.IsUndefined(v) {
-		return "", nil
-	}
-	return v.String(), nil
+	return vm.CallJSON(caseCtx, fn, input)
 }

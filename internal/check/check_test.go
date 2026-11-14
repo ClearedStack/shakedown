@@ -339,3 +339,57 @@ func TestStatusOrder(t *testing.T) {
 		t.Errorf("findings are not in condition order")
 	}
 }
+
+func TestMapMatchesDirAndPathGuards(t *testing.T) {
+	for _, name := range []string{"passing-tool", "failing-tool"} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(testdata, "tools", name)
+			files := map[string][]byte{}
+			err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
+					return err
+				}
+				rel, err := filepath.Rel(root, p)
+				if err != nil {
+					return err
+				}
+				data, err := os.ReadFile(p)
+				if err != nil {
+					return err
+				}
+				files[filepath.ToSlash(rel)] = data
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dirRep, err := Dir(context.Background(), root, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mapRep := Map(context.Background(), files, Options{})
+			_, dirJSON := render(t, dirRep)
+			_, mapJSON := render(t, mapRep)
+			if !bytes.Equal(dirJSON, mapJSON) {
+				t.Errorf("Map output differs from Dir output:\n--- Map ---\n%s\n--- Dir ---\n%s", mapJSON, dirJSON)
+			}
+		})
+	}
+
+	t.Run("rejects traversal and leading slash", func(t *testing.T) {
+		r := Map(context.Background(), map[string][]byte{
+			"../secret.txt": []byte("x"),
+			"/abs.txt":      []byte("x"),
+		}, Options{})
+		if r.Verdict != Fail {
+			t.Fatalf("verdict %s, want fail", r.Verdict)
+		}
+		found := false
+		for _, f := range r.Findings {
+			found = found || f.Rule == "BUNDLE-FILE-NAME"
+		}
+		if !found {
+			t.Fatalf("expected BUNDLE-FILE-NAME in %+v", r.Findings)
+		}
+	})
+}

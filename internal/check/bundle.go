@@ -130,6 +130,91 @@ func (c *checker) load(dir string) (*bundle, error) {
 	return b, nil
 }
 
+func validBundlePath(raw string) bool {
+	if raw == "" || strings.HasPrefix(raw, "/") || strings.HasSuffix(raw, "/") || strings.Contains(raw, "\\") {
+		return false
+	}
+	for _, seg := range strings.Split(raw, "/") {
+		if seg == "" || seg == "." || seg == ".." || !nameRE.MatchString(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *checker) loadMap(files map[string][]byte) *bundle {
+	b := &bundle{exists: map[string]bool{}, data: map[string][]byte{}}
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	total := int64(0)
+	count := 0
+	for _, p := range keys {
+		if !validBundlePath(p) {
+			c.add(wholeBundle, "BUNDLE-FILE-NAME", EParse, "", "a file or folder name uses characters outside letters, digits, dot, dash and underscore")
+			continue
+		}
+		count++
+		if count > maxFiles {
+			c.add(wholeBundle, "BUNDLE-SIZE", EParse, "", "the bundle has more files than the limit allows")
+			break
+		}
+		b.exists[p] = true
+		if p != licenseName && !knownExt[path.Ext(p)] {
+			c.add(wholeBundle, "BUNDLE-FILE-TYPE", ENeedsSubtool, p, "no rule covers this type of file")
+			continue
+		}
+		raw := files[p]
+		if len(raw) > maxFileBytes {
+			c.add(wholeBundle, "BUNDLE-SIZE", EParse, p, "the file is larger than the limit allows")
+			continue
+		}
+		total += int64(len(raw))
+		if total > maxTotalBytes {
+			c.add(wholeBundle, "BUNDLE-SIZE", EParse, "", "the bundle is larger than the limit allows")
+			break
+		}
+		cp := make([]byte, len(raw))
+		copy(cp, raw)
+		b.data[p] = cp
+	}
+	for p := range b.data {
+		b.paths = append(b.paths, p)
+	}
+	sort.Strings(b.paths)
+	return b
+}
+
+var disallowedMarkings = []string{
+	"controlled unclassified information",
+	"cui//",
+	"//noforn",
+	"for official use only",
+	"source selection information",
+	"proprietary and confidential",
+}
+
+func (c *checker) checkHygiene(b *bundle) {
+	for _, p := range b.paths {
+		if c.done() {
+			return
+		}
+		if path.Ext(p) == ".png" {
+			continue
+		}
+		lower := strings.ToLower(string(b.data[p]))
+		for _, mark := range disallowedMarkings {
+			if strings.Contains(lower, mark) {
+				c.add(wholeBundle, "BUNDLE-HYGIENE", EParse, p, "controlled or proprietary markings are not allowed")
+				break
+			}
+		}
+	}
+}
+
 // refKind says what a URL written in the bundle points at.
 type refKind int
 

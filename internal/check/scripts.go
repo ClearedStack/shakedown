@@ -1,12 +1,10 @@
 package check
 
 import (
-	"reflect"
 	"regexp"
 	"strings"
 
-	"github.com/dop251/goja/ast"
-	"github.com/dop251/goja/parser"
+	"github.com/ClearedStack/shakedown/internal/js"
 )
 
 // Names that reach the network once the page has loaded.
@@ -23,46 +21,6 @@ type scriptFacts struct {
 	storageFiles []string // scripts that touch browser storage
 }
 
-var (
-	identType    = reflect.TypeOf(ast.Identifier{})
-	stringType   = reflect.TypeOf(ast.StringLiteral{})
-	templateType = reflect.TypeOf(ast.TemplateElement{})
-)
-
-// walkAST visits every identifier name and every string in the tree.
-func walkAST(v reflect.Value, depth int, name func(string), str func(string)) {
-	if depth > 2000 {
-		return
-	}
-	switch v.Kind() {
-	case reflect.Pointer, reflect.Interface:
-		if !v.IsNil() {
-			walkAST(v.Elem(), depth+1, name, str)
-		}
-	case reflect.Slice:
-		for i := 0; i < v.Len(); i++ {
-			walkAST(v.Index(i), depth+1, name, str)
-		}
-	case reflect.Struct:
-		switch v.Type() {
-		case identType:
-			name(v.FieldByName("Name").String())
-			return
-		case stringType:
-			str(v.FieldByName("Value").String())
-			return
-		case templateType:
-			str(v.FieldByName("Parsed").String())
-			return
-		}
-		for i := 0; i < v.NumField(); i++ {
-			if v.Type().Field(i).IsExported() {
-				walkAST(v.Field(i), depth+1, name, str)
-			}
-		}
-	}
-}
-
 // scanScripts reads every script in the bundle, whether or not a page uses
 // it. The scan is of names and strings as written: it does not follow code
 // that builds a name at run time. The policy check is what stops that.
@@ -72,7 +30,7 @@ func (c *checker) scanScripts(b *bundle) scriptFacts {
 		if c.done() {
 			break
 		}
-		prog, err := parser.ParseFile(nil, p, string(b.data[p]), 0, parser.WithDisableSourceMaps)
+		prog, err := js.Parse(p, string(b.data[p]))
 		if err != nil {
 			c.add(wholeBundle, "BUNDLE-SCRIPT", EParse, p, "the script could not be parsed")
 			continue
@@ -90,12 +48,15 @@ func (c *checker) scanScripts(b *bundle) scriptFacts {
 				storage = true
 			}
 		}
-		walkAST(reflect.ValueOf(prog), 0, see, func(s string) {
+		for _, id := range prog.Identifiers {
+			see(id)
+		}
+		for _, s := range prog.Strings {
 			see(s)
 			if remoteStringRE.MatchString(strings.TrimSpace(s)) {
 				c.add(Offline, "OFF-REMOTE-STRING", EParse, p, "contains an address outside the bundle")
 			}
-		})
+		}
 		if storage {
 			facts.storageFiles = append(facts.storageFiles, p)
 		}

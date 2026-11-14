@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"strings"
 
-	"golang.org/x/net/html"
+	"github.com/ClearedStack/shakedown/internal/htmlparse"
 )
 
 const markerAttr = "data-shakedown"
@@ -51,7 +51,7 @@ var urlAttrs = map[string]bool{"src": true, "href": true, "action": true, "forma
 // executable script types; an empty type is JavaScript too.
 var scriptTypes = map[string]bool{"": true, "text/javascript": true, "application/javascript": true, "module": true}
 
-func attr(n *html.Node, key string) (string, bool) {
+func attr(n *htmlparse.Node, key string) (string, bool) {
 	for _, a := range n.Attr {
 		if a.Key == key {
 			return a.Val, true
@@ -60,11 +60,11 @@ func attr(n *html.Node, key string) (string, bool) {
 	return "", false
 }
 
-func textOf(n *html.Node) string {
+func textOf(n *htmlparse.Node) string {
 	var b strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.TextNode {
+	var walk func(*htmlparse.Node)
+	walk = func(n *htmlparse.Node) {
+		if n.Type == htmlparse.TextNode {
 			b.WriteString(n.Data)
 			b.WriteByte(' ')
 		}
@@ -82,7 +82,7 @@ func (c *checker) scanPages(b *bundle) map[string]*page {
 		if c.done() {
 			break
 		}
-		doc, err := html.Parse(bytes.NewReader(b.data[p]))
+		doc, err := htmlparse.Parse(bytes.NewReader(b.data[p]))
 		if err != nil {
 			c.add(wholeBundle, "BUNDLE-PAGE", EParse, p, "the page could not be read as HTML")
 			continue
@@ -90,9 +90,9 @@ func (c *checker) scanPages(b *bundle) map[string]*page {
 		pg := &page{path: p}
 		pages[p] = pg
 		loadSeen := false
-		var walk func(n *html.Node, inHead bool)
-		walk = func(n *html.Node, inHead bool) {
-			if n.Type == html.ElementNode {
+		var walk func(n *htmlparse.Node, inHead bool)
+		walk = func(n *htmlparse.Node, inHead bool) {
+			if n.Type == htmlparse.ElementNode {
 				c.scanElement(b, pg, n, inHead, &loadSeen)
 				if n.Data == "head" {
 					inHead = true
@@ -107,7 +107,7 @@ func (c *checker) scanPages(b *bundle) map[string]*page {
 	return pages
 }
 
-func (c *checker) scanElement(b *bundle, pg *page, n *html.Node, inHead bool, loadSeen *bool) {
+func (c *checker) scanElement(b *bundle, pg *page, n *htmlparse.Node, inHead bool, loadSeen *bool) {
 	p := pg.path
 	inline := func() {
 		c.add(CSP, "CSP-INLINE", ENeedsSubtool, p, "no rule covers inline script, inline style or inline event handlers")

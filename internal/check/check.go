@@ -49,7 +49,25 @@ func Dir(ctx context.Context, dir string, opts Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	return c.runBundle(b), nil
+}
 
+// Map checks an in-memory map of bundle-relative file paths to file bytes
+// against the five listing conditions without touching the filesystem.
+func Map(ctx context.Context, files map[string][]byte, opts Options) Report {
+	if opts.CaseTimeout <= 0 {
+		opts.CaseTimeout = 2 * time.Second
+	}
+	c := &checker{ctx: ctx, opts: opts}
+	if c.done() {
+		return buildReport(c.findings)
+	}
+	b := c.loadMap(files)
+	return c.runBundle(b)
+}
+
+func (c *checker) runBundle(b *bundle) Report {
+	c.checkHygiene(b)
 	m := c.readManifest(b)
 	c.checkJSONFiles(b)
 
@@ -66,5 +84,5 @@ func Dir(ctx context.Context, dir string, opts Options) (Report, error) {
 	calcs, examplesRead := c.runExamples(b, m)
 	c.checkCitations(b, pages, entry, calcs, examplesRead)
 
-	return buildReport(c.findings), nil
+	return buildReport(c.findings)
 }
