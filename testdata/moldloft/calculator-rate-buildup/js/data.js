@@ -1,0 +1,263 @@
+// Generated from the .json file of the same name. Do not edit.
+globalThis.MOLDLOFT_TOOL = {
+  "contract_version": "v1",
+  "template": "calculator",
+  "slug": "sample-rate-buildup",
+  "title": "Sample hourly rate build-up",
+  "summary": "Builds a made-up hourly rate from a base rate, add-on percentages and a fee, one step at a time. Every rule and number in it is invented to exercise the calculator template.",
+  "scope_limits": [
+    "Every rule, rate and threshold here is fictional. Do not use the result for a real proposal, invoice or contract.",
+    "It covers one labour category at a time and does not add travel, materials or other direct costs.",
+    "It does not check whether a rate is allowable under any real regulation."
+  ],
+  "citations": [
+    {
+      "id": "rule_fringe",
+      "label": "Sample Rule 12.3(a) (fictional)",
+      "note": "Sets the made-up fringe percentage",
+      "url": "https://rules.example/sample-rule-12-3"
+    },
+    {
+      "id": "rule_overhead",
+      "label": "Sample Rule 12.3(b) (fictional)",
+      "note": "Sets the made-up overhead percentage and what it applies to"
+    },
+    {
+      "id": "rule_fee",
+      "label": "Sample Rule 12.4 (fictional)",
+      "note": "Sets the made-up fee tiers and the cap on the fee"
+    },
+    {
+      "id": "rule_floor",
+      "label": "Sample Rule 12.5 (fictional)",
+      "note": "Sets the made-up minimum billable rate"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "base_rate",
+      "label": "Base hourly rate",
+      "kind": "number",
+      "help": "The rate paid for one hour of work, before anything is added.",
+      "unit": "per hour",
+      "decimals": 2,
+      "min": "0.00",
+      "max": "500.00",
+      "default": "40.00"
+    },
+    {
+      "id": "hours",
+      "label": "Hours of work",
+      "kind": "number",
+      "unit": "hours",
+      "decimals": 1,
+      "min": "0",
+      "max": "10000",
+      "default": "100"
+    },
+    {
+      "id": "fee_tier",
+      "label": "Fee tier",
+      "kind": "choice",
+      "unit": "percent",
+      "decimals": 0,
+      "table": "fee_tiers",
+      "default": "standard"
+    }
+  ],
+  "constants": [
+    {
+      "id": "fringe_pct",
+      "label": "Fringe percentage",
+      "value": "32.5",
+      "unit": "percent",
+      "citation": "rule_fringe"
+    },
+    {
+      "id": "overhead_pct",
+      "label": "Overhead percentage",
+      "value": "18.25",
+      "unit": "percent",
+      "citation": "rule_overhead"
+    },
+    {
+      "id": "fee_cap",
+      "label": "Largest fee allowed",
+      "value": "5.00",
+      "unit": "per hour",
+      "citation": "rule_fee"
+    },
+    {
+      "id": "floor_rate",
+      "label": "Minimum billable rate",
+      "value": "60.00",
+      "unit": "per hour",
+      "citation": "rule_floor"
+    },
+    {
+      "id": "hours_per_day",
+      "label": "Hours in a working day",
+      "value": "8",
+      "unit": "hours"
+    }
+  ],
+  "tables": [
+    {
+      "id": "fee_tiers",
+      "label": "Fee tiers",
+      "unit": "percent",
+      "citation": "rule_fee",
+      "rows": [
+        {
+          "key": "low",
+          "label": "Low risk",
+          "value": "5.0"
+        },
+        {
+          "key": "standard",
+          "label": "Standard",
+          "value": "7.5"
+        },
+        {
+          "key": "high",
+          "label": "High risk",
+          "value": "10.0"
+        }
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "id": "fringe",
+      "label": "Fringe",
+      "op": "pct",
+      "args": [
+        "base_rate",
+        "fringe_pct"
+      ],
+      "decimals": 2,
+      "unit": "per hour",
+      "citation": "rule_fringe"
+    },
+    {
+      "id": "overhead_base",
+      "label": "Rate with fringe",
+      "op": "add",
+      "args": [
+        "base_rate",
+        "fringe"
+      ],
+      "decimals": 2,
+      "unit": "per hour",
+      "citation": "rule_overhead"
+    },
+    {
+      "id": "overhead",
+      "label": "Overhead",
+      "op": "pct",
+      "args": [
+        "overhead_base",
+        "overhead_pct"
+      ],
+      "decimals": 2,
+      "unit": "per hour",
+      "citation": "rule_overhead"
+    },
+    {
+      "id": "cost_rate",
+      "label": "Cost rate",
+      "op": "add",
+      "args": [
+        "base_rate",
+        "fringe",
+        "overhead"
+      ],
+      "decimals": 2,
+      "unit": "per hour"
+    },
+    {
+      "id": "fee_uncapped",
+      "label": "Fee before the cap",
+      "op": "pct",
+      "args": [
+        "cost_rate",
+        "fee_tier"
+      ],
+      "decimals": 2,
+      "unit": "per hour",
+      "citation": "rule_fee"
+    },
+    {
+      "id": "fee",
+      "label": "Fee",
+      "op": "min",
+      "args": [
+        "fee_uncapped",
+        "fee_cap"
+      ],
+      "decimals": 2,
+      "unit": "per hour",
+      "citation": "rule_fee"
+    },
+    {
+      "id": "loaded_rate",
+      "label": "Loaded rate",
+      "op": "add",
+      "args": [
+        "cost_rate",
+        "fee"
+      ],
+      "decimals": 2,
+      "unit": "per hour"
+    },
+    {
+      "id": "above_floor",
+      "label": "Loaded rate above the minimum",
+      "op": "sub",
+      "args": [
+        "loaded_rate",
+        "floor_rate"
+      ],
+      "decimals": 2,
+      "unit": "per hour",
+      "citation": "rule_floor"
+    },
+    {
+      "id": "billable_rate",
+      "label": "Billable rate",
+      "op": "max",
+      "args": [
+        "loaded_rate",
+        "floor_rate"
+      ],
+      "decimals": 2,
+      "unit": "per hour",
+      "citation": "rule_floor"
+    },
+    {
+      "id": "total",
+      "label": "Total for the hours",
+      "op": "mul",
+      "args": [
+        "billable_rate",
+        "hours"
+      ],
+      "decimals": 2
+    },
+    {
+      "id": "days",
+      "label": "Working days",
+      "op": "div",
+      "args": [
+        "hours",
+        "hours_per_day"
+      ],
+      "decimals": 1,
+      "unit": "days"
+    }
+  ],
+  "outputs": [
+    "billable_rate",
+    "total"
+  ]
+};

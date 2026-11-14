@@ -182,3 +182,145 @@ func TestVMDeterministicGuards(t *testing.T) {
 		}
 	})
 }
+
+func TestVMBigIntMapAndMoldloftBuiltins(t *testing.T) {
+	src := `
+globalThis.MOLDLOFT_DATA = { prefix: "USD", scale: 4 };
+
+function runCheck(input) {
+  const scale = BigInt(MOLDLOFT_DATA.scale);
+  const factor = 10n ** scale;
+  const a = BigInt(input.whole) * factor + BigInt(input.frac.padEnd(4, "0").slice(0, 4));
+  const half = 5000n;
+  const rounded = (a + half) / factor;
+  const neg = (-7n) / 2n;
+  const rem = (-7n) % 2n;
+
+  const seen = new Map();
+  seen.set("total", rounded);
+  seen.set("hex", 0xffn);
+
+  const hasWhole = Object.prototype.hasOwnProperty.call(input, "whole");
+  const hasMissing = Object.prototype.hasOwnProperty.call(input, "missing");
+  const codePoints = Array.from(input.label).length;
+  const utf16Units = input.label.length;
+
+  let mapKeys = [];
+  for (const entry of seen) {
+    mapKeys.push(entry[0] + "=" + entry[1].toString());
+  }
+
+  return {
+    prefix: globalThis.MOLDLOFT_DATA.prefix,
+    rounded: seen.get("total").toString(),
+    neg: neg.toString(),
+    rem: rem.toString(),
+    hasHex: seen.has("hex"),
+    size: seen.size,
+    hasWhole: hasWhole,
+    hasMissing: hasMissing,
+    codePoints: codePoints,
+    utf16Units: utf16Units,
+    entries: mapKeys
+  };
+}
+`
+	prog, err := Parse("moldloft.js", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	vm := NewVM()
+	if err := vm.RunProgram(context.Background(), prog); err != nil {
+		t.Fatalf("RunProgram: %v", err)
+	}
+	got, err := vm.CallJSON(context.Background(), "runCheck", []byte(`{"whole":12,"frac":"55","label":"A\ud83d\ude00B"}`))
+	if err != nil {
+		t.Fatalf("CallJSON: %v", err)
+	}
+	want := `{"prefix":"USD","rounded":"13","neg":"-3","rem":"-1","hasHex":true,"size":2,"hasWhole":true,"hasMissing":false,"codePoints":3,"utf16Units":4,"entries":["total=13","hex=255"]}`
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+
+	evalOut, err := vm.EvalJSON(context.Background(), `globalThis.MOLDLOFT_DATA`)
+	if err != nil {
+		t.Fatalf("EvalJSON: %v", err)
+	}
+	if evalOut != `{"prefix":"USD","scale":4}` {
+		t.Fatalf("EvalJSON = %s", evalOut)
+	}
+}
+
+func TestVMMemoryCapsThrowCleanly(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "string doubling cap",
+			src: `function f() {
+				let s = "abcdefgh";
+				for (let i = 0; i < 30; i++) { s = s + s; }
+				return s.length;
+			}`,
+		},
+		{
+			name: "string repeat cap",
+			src:  `function f() { return "abcd".repeat(200000); }`,
+		},
+		{
+			name: "padStart cap",
+			src:  `function f() { return "x".padStart(500000, "0"); }`,
+		},
+		{
+			name: "array push cap",
+			src: `function f() {
+				const a = [];
+				for (let i = 0; i < 20000; i++) { a.push(i); }
+				return a.length;
+			}`,
+		},
+		{
+			name: "Array constructor cap",
+			src:  `function f() { return Array(20000).length; }`,
+		},
+		{
+			name: "object property cap",
+			src: `function f() {
+				const o = {};
+				for (let i = 0; i < 5000; i++) { o["k" + i] = i; }
+				return 1;
+			}`,
+		},
+		{
+			name: "BigInt exponentiation cap",
+			src:  `function f() { return (2n ** 20000n).toString(); }`,
+		},
+		{
+			name: "VM total allocation budget",
+			src: `function f() {
+				let last = null;
+				for (let i = 0; i < 100000; i++) { last = { i: i }; }
+				return last;
+			}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prog, err := Parse("cap.js", tc.src)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			vm := NewVM()
+			if err := vm.RunProgram(context.Background(), prog); err != nil {
+				t.Fatalf("RunProgram: %v", err)
+			}
+			_, err = vm.CallJSON(context.Background(), "f", []byte(`null`))
+			if !errors.Is(err, ErrRuntime) {
+				t.Fatalf("got %v, want ErrRuntime", err)
+			}
+		})
+	}
+}
+

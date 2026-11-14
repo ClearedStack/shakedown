@@ -3,6 +3,8 @@ package check
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"os"
@@ -393,3 +395,233 @@ func TestMapMatchesDirAndPathGuards(t *testing.T) {
 		}
 	})
 }
+
+func loadDirMap(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	files := map[string][]byte{}
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = data
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func recomputeMoldloftManifest(t *testing.T, files map[string][]byte) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(files["moldloft.json"], &doc); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for name := range files {
+		if name == "moldloft.json" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		sum := sha256.Sum256(files[name])
+		entries = append(entries, map[string]any{
+			"path":   name,
+			"bytes":  len(files[name]),
+			"sha256": hex.EncodeToString(sum[:]),
+		})
+	}
+	doc["files"] = entries
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files["moldloft.json"] = append(raw, '\n')
+}
+
+func assertHasRule(t *testing.T, r Report, wantVerdict Status, wantRule string) {
+	t.Helper()
+	if r.Verdict != wantVerdict {
+		t.Fatalf("verdict = %s, want %s (findings: %+v)", r.Verdict, wantVerdict, r.Findings)
+	}
+	for _, f := range r.Findings {
+		if f.Rule == wantRule {
+			return
+		}
+	}
+	t.Fatalf("missing rule %s in findings: %+v", wantRule, r.Findings)
+}
+
+func TestMoldloftGoldenBundles(t *testing.T) {
+	dirs, err := os.ReadDir(filepath.Join(testdata, "moldloft"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) < 5 {
+		t.Fatalf("expected at least 5 Moldloft golden fixtures, got %d", len(dirs))
+	}
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		name := d.Name()
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(testdata, "moldloft", name)
+			dirRep, err := Dir(context.Background(), root, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dirRep.Verdict != Pass {
+				t.Fatalf("verdict = %s, want pass; findings: %+v", dirRep.Verdict, dirRep.Findings)
+			}
+			for _, c := range dirRep.Conditions {
+				if c.Status != Pass {
+					t.Errorf("condition %s = %s, want pass", c.Condition, c.Status)
+				}
+			}
+			mapRep := Map(context.Background(), loadDirMap(t, root), Options{})
+			_, dirJSON := render(t, dirRep)
+			_, mapJSON := render(t, mapRep)
+			if !bytes.Equal(dirJSON, mapJSON) {
+				t.Errorf("Map output differs from Dir output:\n--- Map ---\n%s\n--- Dir ---\n%s", mapJSON, dirJSON)
+			}
+		})
+	}
+}
+
+func TestMoldloftTamperAndMarkdownChecks(t *testing.T) {
+	t.Run("manifest_digest_mismatch", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "calculator-rate-buildup"))
+		files["README.md"] = append(files["README.md"], []byte("\nextra line\n")...)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "BUNDLE-MANIFEST")
+	})
+
+	t.Run("manifest_unlisted_file", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "checklist-solicitation-review"))
+		files["docs/extra.md"] = []byte("# Extra\n")
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "BUNDLE-MANIFEST")
+	})
+
+	t.Run("unsupported_template_pauses_needs_subtool", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "checklist-solicitation-review"))
+		files["moldloft.json"] = bytes.Replace(files["moldloft.json"], []byte(`"checklist"`), []byte(`"spreadsheet"`), 1)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, NeedsSubtool, "BUNDLE-TEMPLATE")
+	})
+
+	t.Run("data_js_mirror_divergence", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "calculator-rate-buildup"))
+		files["js/data.js"] = bytes.Replace(files["js/data.js"], []byte(`"Sample hourly rate build-up"`), []byte(`"Tampered title"`), 1)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "EX-SCRIPT")
+	})
+
+	t.Run("worked_examples_js_mirror_divergence", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "validator-line-code-check"))
+		files["tests/worked-examples.js"] = bytes.Replace(files["tests/worked-examples.js"], []byte(`"Two valid schedule rows"`), []byte(`"Different label"`), 1)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "EX-SCRIPT")
+	})
+
+	t.Run("worked_example_expected_mismatch_all_four_templates", func(t *testing.T) {
+		cases := []struct {
+			bundle string
+			old    string
+			bad    string
+		}{
+			{"calculator-rate-buildup", `"6737.00"`, `"6737.01"`},
+			{"checklist-solicitation-review", `"unmet_required": 0`, `"unmet_required": 2`},
+			{"decision-tree-clause-routing", `"micro_purchase_ok"`, `"specialist_review"`},
+			{"validator-line-code-check", `"error_count": 2`, `"error_count": 1`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.bundle, func(t *testing.T) {
+				files := loadDirMap(t, filepath.Join(testdata, "moldloft", tc.bundle))
+				files["tests/worked-examples.json"] = bytes.Replace(files["tests/worked-examples.json"], []byte(tc.old), []byte(tc.bad), 1)
+				files["tests/worked-examples.js"] = bytes.Replace(files["tests/worked-examples.js"], []byte(tc.old), []byte(tc.bad), 1)
+				recomputeMoldloftManifest(t, files)
+				r := Map(context.Background(), files, Options{})
+				assertHasRule(t, r, Fail, "EX-MISMATCH")
+			})
+		}
+	})
+
+	t.Run("remote_url_in_engine_js_rejected_even_if_citation_url", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "calculator-rate-buildup"))
+		files["js/engine.js"] = append(files["js/engine.js"], []byte("\nconst leaked = \"https://rules.example/sample-rule-12-3\";\n")...)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "OFF-REMOTE-STRING")
+	})
+
+	t.Run("unlisted_remote_url_in_data_js_rejected", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "calculator-rate-buildup"))
+		files["data/tool.json"] = bytes.Replace(files["data/tool.json"], []byte(`"Sample hourly rate build-up"`), []byte(`"https://evil.example/beacon"`), 1)
+		files["js/data.js"] = bytes.Replace(files["js/data.js"], []byte(`"Sample hourly rate build-up"`), []byte(`"https://evil.example/beacon"`), 1)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "OFF-REMOTE-STRING")
+	})
+
+	t.Run("markdown_broken_link_and_remote_image", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "checklist-solicitation-review"))
+		mdExtra := "\n```markdown\n[ignored](does-not-exist.md)\n```\n\nSee [missing](missing.md) and ![beacon](https://evil.example/p.png).\n"
+		files["README.md"] = append(files["README.md"], []byte(mdExtra)...)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "OFF-MISSING-REFERENCE")
+		assertHasRule(t, r, Fail, "OFF-REMOTE-REFERENCE")
+	})
+
+	t.Run("missing_scope_section_and_missing_citation_item", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "decision-tree-clause-routing"))
+		files["index.html"] = bytes.Replace(files["index.html"], []byte(`aria-labelledby="h-scope"`), []byte(`aria-labelledby="other"`), 1)
+		files["index.html"] = bytes.Replace(files["index.html"], []byte(`id="cite-manual_part_15"`), []byte(`id="cite-removed"`), 1)
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "CIT-SCOPE")
+		assertHasRule(t, r, Fail, "CIT-INCOMPLETE")
+	})
+
+	t.Run("untested_citation_in_decision_tree", func(t *testing.T) {
+		files := loadDirMap(t, filepath.Join(testdata, "moldloft", "decision-tree-clause-routing"))
+		onlyMicro := `[
+  {
+    "id": "standard_micro",
+    "label": "Micro-purchase without hazard endorsement",
+    "answers": {
+      "supplies_or_services": "no",
+      "under_micro_limit": "yes"
+    },
+    "expect": {
+      "outcome": "micro_purchase_ok",
+      "status": "eligible",
+      "steps": 2
+    }
+  }
+]
+`
+		files["tests/worked-examples.json"] = []byte(onlyMicro)
+		files["tests/worked-examples.js"] = []byte("(function () {\n  \"use strict\";\n  globalThis.MOLDLOFT_EXAMPLES = " + strings.TrimSpace(onlyMicro) + ";\n})();\n")
+		recomputeMoldloftManifest(t, files)
+		r := Map(context.Background(), files, Options{})
+		assertHasRule(t, r, Fail, "EX-UNTESTED")
+	})
+}
+

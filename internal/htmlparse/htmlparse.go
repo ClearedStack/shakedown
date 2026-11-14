@@ -118,13 +118,8 @@ func Parse(r io.Reader) (*Node, error) {
 		if txt == "" {
 			return
 		}
-		unescaped := html.UnescapeString(txt)
 		cur := top()
-		if cur.LastChild != nil && cur.LastChild.Type == TextNode {
-			cur.LastChild.Data += unescaped
-			return
-		}
-		cur.appendChild(&Node{Type: TextNode, Data: unescaped})
+		cur.appendChild(&Node{Type: TextNode, Data: html.UnescapeString(txt)})
 	}
 
 	i := 0
@@ -261,7 +256,30 @@ func Parse(r io.Reader) (*Node, error) {
 		}
 	}
 
+	coalesceText(doc)
 	return doc, nil
+}
+
+func coalesceText(n *Node) {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == TextNode && c.NextSibling != nil && c.NextSibling.Type == TextNode {
+			var b strings.Builder
+			b.WriteString(c.Data)
+			cur := c.NextSibling
+			for cur != nil && cur.Type == TextNode {
+				b.WriteString(cur.Data)
+				cur = cur.NextSibling
+			}
+			c.Data = b.String()
+			c.NextSibling = cur
+			if cur == nil {
+				n.LastChild = c
+			}
+		}
+		if c.FirstChild != nil {
+			coalesceText(c)
+		}
+	}
 }
 
 func isASCIILetter(b byte) bool {

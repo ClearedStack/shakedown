@@ -34,9 +34,14 @@ type policyMeta struct {
 }
 
 type page struct {
-	path     string
-	policies []policyMeta
-	markers  []marker
+	path             string
+	policies         []policyMeta
+	markers          []marker
+	hasScopeSection  bool
+	scopeItems       []string
+	footerText       string
+	citeItems        map[string]string
+	citeLinks        map[string]bool
 }
 
 // loaders are the elements that can fetch or run something. A policy written
@@ -87,22 +92,58 @@ func (c *checker) scanPages(b *bundle) map[string]*page {
 			c.add(wholeBundle, "BUNDLE-PAGE", EParse, p, "the page could not be read as HTML")
 			continue
 		}
-		pg := &page{path: p}
+		pg := &page{
+			path:      p,
+			citeItems: map[string]string{},
+			citeLinks: map[string]bool{},
+		}
 		pages[p] = pg
 		loadSeen := false
-		var walk func(n *htmlparse.Node, inHead bool)
-		walk = func(n *htmlparse.Node, inHead bool) {
+		var walk func(n *htmlparse.Node, inHead, inScope, inSources bool)
+		walk = func(n *htmlparse.Node, inHead, inScope, inSources bool) {
 			if n.Type == htmlparse.ElementNode {
 				c.scanElement(b, pg, n, inHead, &loadSeen)
-				if n.Data == "head" {
+				switch n.Data {
+				case "head":
 					inHead = true
+				case "section":
+					labelBy, _ := attr(n, "aria-labelledby")
+					if labelBy == "h-scope" {
+						pg.hasScopeSection = true
+						inScope = true
+					} else if labelBy == "h-sources" {
+						inSources = true
+					}
+				case "li":
+					if inScope {
+						if txt := textOf(n); txt != "" {
+							pg.scopeItems = append(pg.scopeItems, txt)
+						}
+					}
+					if inSources {
+						if id, ok := attr(n, "id"); ok && strings.HasPrefix(id, "cite-") {
+							pg.citeItems[strings.TrimPrefix(id, "cite-")] = textOf(n)
+						}
+					}
+				case "a":
+					if href, ok := attr(n, "href"); ok && strings.HasPrefix(href, "#cite-") && textOf(n) != "" {
+						pg.citeLinks[strings.TrimPrefix(href, "#cite-")] = true
+					}
+				case "footer":
+					if txt := textOf(n); txt != "" {
+						if pg.footerText == "" {
+							pg.footerText = txt
+						} else {
+							pg.footerText += " " + txt
+						}
+					}
 				}
 			}
 			for k := n.FirstChild; k != nil; k = k.NextSibling {
-				walk(k, inHead)
+				walk(k, inHead, inScope, inSources)
 			}
 		}
-		walk(doc, false)
+		walk(doc, false, false, false)
 	}
 	return pages
 }
@@ -169,6 +210,153 @@ func (c *checker) scanElement(b *bundle, pg *page, n *htmlparse.Node, inHead boo
 			c.reportRef(b, p, a.Val, navigation)
 		}
 	}
+}
+
+// scanMarkdown inspects bundled Markdown documentation (.md) for local or
+// external link/image references and embedded HTML elements.
+func (c *checker) scanMarkdown(b *bundle) {
+	for _, p := range b.withExt(".md") {
+		if c.done() {
+			break
+		}
+		cleaned := stripMarkdownCode(string(b.data[p]))
+		c.scanMarkdownLinks(b, p, cleaned)
+		if hasRawHTMLTag(cleaned) {
+			doc, err := htmlparse.Parse(strings.NewReader(cleaned))
+			if err == nil {
+				pg := &page{path: p, citeItems: map[string]string{}, citeLinks: map[string]bool{}}
+				loadSeen := false
+				var walk func(*htmlparse.Node)
+				walk = func(n *htmlparse.Node) {
+					if n.Type == htmlparse.ElementNode {
+						c.scanElement(b, pg, n, false, &loadSeen)
+					}
+					for k := n.FirstChild; k != nil; k = k.NextSibling {
+						walk(k)
+					}
+				}
+				walk(doc)
+			}
+		}
+	}
+}
+
+func stripMarkdownCode(md string) string {
+	lines := strings.Split(md, "\n")
+	var out strings.Builder
+	inFence := false
+	fenceChar := byte(0)
+	prevBlank := true
+
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if !inFence && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
+			inFence = true
+			fenceChar = trimmed[0]
+			out.WriteByte('\n')
+			continue
+		}
+		if inFence {
+			if strings.HasPrefix(trimmed, string([]byte{fenceChar, fenceChar, fenceChar})) {
+				inFence = false
+			}
+			out.WriteByte('\n')
+			continue
+		}
+		if prevBlank && (strings.HasPrefix(line, "    ") || strings.HasPrefix(line, "\t")) {
+			out.WriteByte('\n')
+			continue
+		}
+		prevBlank = strings.TrimSpace(line) == ""
+		out.WriteString(stripInlineCodeSpans(line))
+		out.WriteByte('\n')
+	}
+	return out.String()
+}
+
+func stripInlineCodeSpans(line string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(line) {
+		if line[i] != '`' {
+			b.WriteByte(line[i])
+			i++
+			continue
+		}
+		ticks := 0
+		for i+ticks < len(line) && line[i+ticks] == '`' {
+			ticks++
+		}
+		delim := line[i : i+ticks]
+		end := strings.Index(line[i+ticks:], delim)
+		if end < 0 {
+			b.WriteString(delim)
+			i += ticks
+			continue
+		}
+		b.WriteByte(' ')
+		i += ticks + end + ticks
+	}
+	return b.String()
+}
+
+func (c *checker) scanMarkdownLinks(b *bundle, from, text string) {
+	n := len(text)
+	for i := 0; i < n; i++ {
+		isImg := false
+		if text[i] == '!' && i+1 < n && text[i+1] == '[' {
+			isImg = true
+			i++
+		} else if text[i] != '[' {
+			continue
+		}
+		closeBracket := strings.IndexByte(text[i+1:], ']')
+		if closeBracket < 0 {
+			continue
+		}
+		after := i + 1 + closeBracket + 1
+		if after >= n || text[after] != '(' {
+			continue
+		}
+		depth := 1
+		j := after + 1
+		for j < n && depth > 0 {
+			switch text[j] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			case '\n':
+				depth = -1
+			}
+			if depth > 0 {
+				j++
+			}
+		}
+		if depth != 0 {
+			continue
+		}
+		dest := strings.TrimSpace(text[after+1 : j])
+		if strings.HasPrefix(dest, "<") && strings.HasSuffix(dest, ">") {
+			dest = strings.TrimSpace(dest[1 : len(dest)-1])
+		} else if sp := strings.IndexAny(dest, " \t"); sp >= 0 {
+			dest = dest[:sp]
+		}
+		c.reportRef(b, from, dest, !isImg)
+		i = j
+	}
+}
+
+func hasRawHTMLTag(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == '<' {
+			ch := s[i+1]
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // reportRef applies the reference rules shared by pages and style sheets.

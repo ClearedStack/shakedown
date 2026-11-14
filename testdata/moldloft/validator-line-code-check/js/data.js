@@ -1,0 +1,75 @@
+// Generated from the .json file of the same name. Do not edit.
+globalThis.MOLDLOFT_TOOL = {
+  "slug": "sample-line-code-check",
+  "title": "Sample Line Code Validator",
+  "summary": "Validates pipe-delimited line-item schedule records against numeric, code and table rules.",
+  "scope_limits": [
+    "Checks syntax, lengths and allowed unit codes only; does not verify pricing reasonableness.",
+    "Synthetic fixture rule set, not an active agency schedule instruction."
+  ],
+  "citations": [
+    {
+      "id": "handbook_sec_5",
+      "label": "Sample Schedule Formatting Guide, Section 5.1",
+      "note": "Synthetic public-domain validation rule set used solely as a Moldloft test fixture."
+    },
+    {
+      "id": "handbook_app_b",
+      "label": "Sample Schedule Formatting Guide, Appendix B",
+      "note": "Synthetic table of allowed unit-of-issue codes."
+    }
+  ],
+  "delimiter": "pipe",
+  "separator": "|",
+  "has_header": true,
+  "tables": [
+    {
+      "id": "unit_codes",
+      "label": "Allowed unit codes",
+      "citation": "handbook_app_b",
+      "codes": [
+        "EA",
+        "HR",
+        "LOT",
+        "MO"
+      ]
+    }
+  ],
+  "columns": [
+    {
+      "id": "clin",
+      "label": "Line item number",
+      "required": true,
+      "rule": "digits",
+      "citation": "handbook_sec_5",
+      "min_len": 4,
+      "max_len": 6
+    },
+    {
+      "id": "acct_code",
+      "label": "Account code",
+      "required": true,
+      "rule": "upper_code",
+      "citation": "handbook_sec_5",
+      "min_len": 6,
+      "max_len": 10,
+      "prefix": "AC-"
+    },
+    {
+      "id": "unit",
+      "label": "Unit of issue",
+      "required": true,
+      "rule": "in_table",
+      "citation": "handbook_app_b",
+      "table": "unit_codes"
+    },
+    {
+      "id": "note",
+      "label": "Line description",
+      "required": false,
+      "rule": "text",
+      "citation": "handbook_sec_5",
+      "max_len": 40
+    }
+  ]
+};

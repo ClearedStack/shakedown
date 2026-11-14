@@ -390,3 +390,157 @@ func (f *flakyCompleteDispatcher) Complete(ctx context.Context, lease, state str
 	}
 	return f.Dispatcher.Complete(ctx, lease, state, result)
 }
+
+func loadMoldloftGoldenResult(t *testing.T, dir, template, slug string, arrayForm bool) json.RawMessage {
+	t.Helper()
+	var arrayEntries []map[string]string
+	mapEntries := map[string]any{}
+
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		slash := filepath.ToSlash(rel)
+		if arrayForm {
+			if slash == "LICENSE" {
+				arrayEntries = append(arrayEntries, map[string]string{
+					"path":   slash,
+					"base64": base64.StdEncoding.EncodeToString(raw),
+				})
+			} else {
+				arrayEntries = append(arrayEntries, map[string]string{
+					"path":    slash,
+					"content": string(raw),
+				})
+			}
+		} else {
+			if slash == "LICENSE" {
+				mapEntries[slash] = map[string]string{"base64": base64.StdEncoding.EncodeToString(raw)}
+			} else {
+				mapEntries[slash] = string(raw)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := map[string]any{
+		"publish": map[string]any{
+			"repository": "https://github.com/clearedstack/" + slug,
+		},
+		"build": map[string]any{
+			"contract_version": "v1",
+			"template":         template,
+			"tool_slug":        slug,
+			"committed":        true,
+		},
+	}
+	if arrayForm {
+		payload["files"] = arrayEntries
+	} else {
+		payload["files"] = mapEntries
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestWorkerVerifiesAllFourMoldloftTemplates(t *testing.T) {
+	cases := []struct {
+		id        string
+		fixture   string
+		template  string
+		slug      string
+		arrayForm bool
+	}{
+		{"PA-1001", "calculator-rate-buildup", "calculator", "sample-rate-buildup", false},
+		{"PA-1002", "checklist-solicitation-review", "checklist", "sample-solicitation-review", true},
+		{"PA-1003", "decision-tree-clause-routing", "decision-tree", "sample-clause-routing", false},
+		{"PA-1004", "validator-line-code-check", "validator", "sample-line-code-check", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.fixture, func(t *testing.T) {
+			standIn, _, w, _, _ := newTestHarness(t)
+			bundleJSON := loadMoldloftGoldenResult(t, filepath.Join("../../testdata/moldloft", tc.fixture), tc.template, tc.slug, tc.arrayForm)
+
+			if err := standIn.Seed([]muster.SeedItem{{
+				ID:    tc.id,
+				State: "building",
+				Lane:  "normal",
+				Next:  "shakedown",
+				Results: map[string]json.RawMessage{
+					"waybill":  json.RawMessage(`{"template":"` + tc.template + `"}`),
+					"moldloft": bundleJSON,
+				},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+
+			worked, err := w.Step(context.Background())
+			if err != nil || !worked {
+				t.Fatalf("Step() = (%v, %v), want (true, nil)", worked, err)
+			}
+
+			it, ok, held := standIn.Item(tc.id)
+			if !ok || held || it.State != "building" {
+				t.Fatalf("item ok=%v held=%v state=%s", ok, held, it.State)
+			}
+			if got := standIn.NextWorker(tc.id); got != "chartroom" {
+				t.Fatalf("next worker = %q, want chartroom", got)
+			}
+
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(it.Results["shakedown"], &top); err != nil {
+				t.Fatal(err)
+			}
+			var strictAtt struct {
+				Conditions []struct {
+					Name   string `json:"name"`
+					Passed bool   `json:"passed"`
+				} `json:"conditions"`
+			}
+			dec := json.NewDecoder(bytes.NewReader(top["attestation"]))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&strictAtt); err != nil {
+				t.Fatalf("attestation decode failed: %v", err)
+			}
+			if len(strictAtt.Conditions) != 5 {
+				t.Fatalf("got %d conditions, want 5", len(strictAtt.Conditions))
+			}
+			for _, c := range strictAtt.Conditions {
+				if !c.Passed {
+					t.Errorf("condition %s did not pass", c.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestDecodeMoldloftBundleRejectsMalformedEnvelopes(t *testing.T) {
+	badInputs := []string{
+		`{"publish":{"repository":"https://github.com/clearedstack/demo"},"build":{"contract_version":"v1"}}`,
+		`{"publish":"not-an-object","files":{"index.html":"x"}}`,
+		`{"files":[{"path":"a.txt","content":"1"},{"path":"a.txt","content":"2"}]}`,
+		`{"files":[{"path":"a.txt","content":"1","base64":"MQ=="}]}`,
+		`{"files":[{"path":"a.txt"}]}`,
+	}
+	for i, raw := range badInputs {
+		if _, amb, err := decodeMoldloftBundle(json.RawMessage(raw)); err == nil || amb {
+			t.Errorf("case %d (%s): expected error, got amb=%v err=%v", i, raw, amb, err)
+		}
+	}
+}
+

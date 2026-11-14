@@ -24,8 +24,14 @@ type scriptFacts struct {
 // scanScripts reads every script in the bundle, whether or not a page uses
 // it. The scan is of names and strings as written: it does not follow code
 // that builds a name at run time. The policy check is what stops that.
-func (c *checker) scanScripts(b *bundle) scriptFacts {
+func (c *checker) scanScripts(b *bundle, m *manifest) scriptFacts {
 	var facts scriptFacts
+	var allowedDataURLs map[string]bool
+	if m != nil && m.Kind == manifestMoldloft {
+		allowedDataURLs = m.AllowedDataURLs
+	} else if m == nil && b.isMoldloft() {
+		allowedDataURLs = peekMoldloftCitationURLs(b, b.data["data/tool.json"])
+	}
 	for _, p := range b.withExt(".js") {
 		if c.done() {
 			break
@@ -53,8 +59,11 @@ func (c *checker) scanScripts(b *bundle) scriptFacts {
 		}
 		for _, s := range prog.Strings {
 			see(s)
-			if remoteStringRE.MatchString(strings.TrimSpace(s)) {
-				c.add(Offline, "OFF-REMOTE-STRING", EParse, p, "contains an address outside the bundle")
+			trimmed := strings.TrimSpace(s)
+			if remoteStringRE.MatchString(trimmed) {
+				if !(p == "js/data.js" && allowedDataURLs[trimmed]) {
+					c.add(Offline, "OFF-REMOTE-STRING", EParse, p, "contains an address outside the bundle")
+				}
 			}
 		}
 		if storage {

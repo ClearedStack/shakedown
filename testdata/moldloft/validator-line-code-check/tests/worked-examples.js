@@ -1,0 +1,23 @@
+// Generated from the .json file of the same name. Do not edit.
+globalThis.MOLDLOFT_EXAMPLES = [
+  {
+    "id": "valid_two_rows",
+    "label": "Two valid schedule rows",
+    "input": "clin|acct_code|unit|note\n0001|AC-1040|EA|Base hardware kit\n0002|AC-2080|HR|",
+    "expect": {
+      "valid": true,
+      "row_count": 2,
+      "error_count": 0
+    }
+  },
+  {
+    "id": "bad_unit_and_missing_code",
+    "label": "Missing account code and unlisted unit code",
+    "input": "clin|acct_code|unit|note\n0001||EA|Missing account\n0002|AC-2080|BOX|Unknown unit",
+    "expect": {
+      "valid": false,
+      "row_count": 2,
+      "error_count": 2
+    }
+  }
+];
